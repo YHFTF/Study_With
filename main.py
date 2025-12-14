@@ -7,6 +7,9 @@ import ctypes
 from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QFontDatabase, QFont
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtCore import QUrl
+
 from ui import StudyWithUI, PipUI
 
 # Flask 관련 (확장 프로그램 연동용)
@@ -169,6 +172,27 @@ class StudyWithLogic(StudyWithUI):
         # 시작 시 block_list 폴더가 없으면 생성
         self.preset_dir = os.path.join(os.getcwd(), "block_list")
         os.makedirs(self.preset_dir, exist_ok=True)
+
+        #사운드 플레이어 설정
+        self.player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.player.setAudioOutput(self.audio_output)
+        self.audio_output.setVolume(1.0) # 볼륨 100% (0.0 ~ 1.0)
+
+    def play_sound(self, file_name):
+        """assets/sounds 폴더에 있는 mp3 파일을 재생합니다."""
+        try:
+            # resource_path를 사용해 exe에서도 경로를 찾을 수 있게 함
+            sound_path = resource_path(os.path.join("assets", "sounds", file_name))
+            
+            if os.path.exists(sound_path):
+                self.player.setSource(QUrl.fromLocalFile(sound_path))
+                self.player.play()
+                self.handle_log(f"🔊 사운드 재생됨: {file_name}", "INFO")
+            else:
+                self.handle_log(f"⚠️ 사운드 파일 없음: {file_name}", "WARNING")
+        except Exception as e:
+            self.handle_log(f"⚠️ 사운드 재생 오류: {e}", "ERROR")
 
     def switch_to_pip(self):
         """메인 창을 숨기고 PIP 창을 보여줍니다."""
@@ -376,11 +400,13 @@ class StudyWithLogic(StudyWithUI):
             else:
                 self.timer.stop()
                 if self.current_state == "FOCUS":
+                    self.play_sound("focus_end.mp3")
                     if self.current_cycle >= self.total_cycles:
                         self.finish_all_sessions()
                     else:
                         self.enter_break_mode()
                 elif self.current_state == "BREAK":
+                    self.play_sound("break_end.mp3")
                     self.current_cycle += 1
                     self.enter_focus_mode()
 
