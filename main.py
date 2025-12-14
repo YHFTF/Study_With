@@ -16,6 +16,17 @@ from flask_cors import CORS
 # ★ 분리한 UI 파일 불러오기
 from ui import StudyWithUI
 
+#PyInstaller 경로 호환 함수
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
 # ---------------------------------------------------------
 # [로직 1] 관리자 권한 체크
 # ---------------------------------------------------------
