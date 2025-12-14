@@ -7,6 +7,7 @@ import random
 import shutil
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import psutil
@@ -16,6 +17,8 @@ from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from .ui import PipUI, StudyWithUI
+from .session_manager import SessionManager
+from .rank_themes import get_theme
 
 # Flask 관련 (확장 프로그램 연동용)
 from flask import Flask, jsonify
@@ -102,15 +105,24 @@ def is_admin():
 def run_as_admin():
     # Only Windows supports ShellExecute "runas" here.
     if platform.system() != "Windows":
-        return
+        return False
 
     script = os.path.abspath(sys.argv[0])
     params = " ".join([script] + sys.argv[1:])
     try:
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
-        sys.exit(0)
-    except Exception:
-        pass
+        # 관리자 권한으로 재실행
+        result = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 1)
+        # ShellExecuteW가 성공하면 32보다 큰 값 반환
+        if result > 32:
+            # 새 프로세스가 시작되었으므로 현재 프로세스 종료
+            sys.exit(0)
+        else:
+            # 사용자가 취소했거나 실패한 경우
+            return False
+    except Exception as e:
+        # 초기화 전이므로 print 사용
+        print(f"관리자 권한 승격 오류: {e}")
+        return False
 
 # ---------------------------------------------------------
 # [로직 2] 백그라운드 스레드들 (Flask API, 프로세스 차단기)
@@ -212,15 +224,41 @@ class StudyWithLogic(StudyWithUI):
         # 상태 변수 초기화
         self.is_running = False
         self.log_mode = False
+        self.simple_mode = False  # 심플 모드 상태
         self.current_state = "READY"
         self.time_left = 0
         self.total_cycles = 0
         self.current_cycle = 0
         self.current_sites = []
         self.current_apps = []
-        self.pip_window = PipUI()
+        
+        # 세션 기록 관리 (먼저 초기화)
+        try:
+            self.session_manager = SessionManager()
+            self.handle_log("세션 매니저 초기화 완료", "INFO")
+        except Exception as e:
+            self.handle_log(f"세션 매니저 초기화 오류: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
+            # 기본값으로 계속 진행
+            self.session_manager = None
+        
+        # PIP 창 초기화 (세션 매니저 이후)
+        try:
+            self.pip_window = PipUI()
+            self.handle_log("PIP 창 초기화 완료", "INFO")
+        except Exception as e:
+            self.handle_log(f"PIP 창 초기화 오류: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
+            self.pip_window = None
+        
         self.is_pip_mode = False
         self.blocker_thread = None
+        self.session_start_time = None
+        self.total_focus_seconds = 0  # 이번 세션의 총 집중 시간(초)
+        self.focus_duration = 0  # 집중 시간 설정값(분)
+        self.break_duration = 0  # 휴식 시간 설정값(분)
         
         # API 서버 즉시 시작 (확장 프로그램 통신용)
         self.api_server = ApiServerThread()
@@ -233,10 +271,35 @@ class StudyWithLogic(StudyWithUI):
         self.start_btn.clicked.connect(self.toggle_session)
         self.save_btn.clicked.connect(self.save_preset)
         self.load_btn.clicked.connect(self.load_preset)
+        self.simple_mode_check.stateChanged.connect(self.toggle_simple_mode)
         self.log_check.stateChanged.connect(self.toggle_log_mode)
 
         self.pip_btn.clicked.connect(self.switch_to_pip)
-        self.pip_window.return_btn.clicked.connect(self.return_from_pip)
+        if self.pip_window is not None:
+            self.pip_window.return_btn.clicked.connect(self.return_from_pip)
+        
+        # 통계 창 초기화
+        try:
+            if self.session_manager is not None:
+                from .ui import StatsWindow
+                # 로그 핸들러를 전달하여 모든 로그를 프로그램 내부 로그 모드로 출력
+                self.stats_window = StatsWindow(self.session_manager, log_handler=self.handle_log)
+                self.stats_btn.clicked.connect(self.show_stats)
+            else:
+                self.stats_window = None
+                self.handle_log("세션 매니저가 없어 통계 창을 초기화할 수 없습니다.", "WARNING")
+        except Exception as e:
+            self.handle_log(f"통계 창 초기화 오류: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
+            self.stats_window = None
+        
+        # 초기 등급 적용 (예외 처리)
+        try:
+            self.update_ui_rank()
+        except Exception as e:
+            self.handle_log(f"등급 스타일 적용 오류: {e}", "ERROR")
+            # 기본 스타일 유지
 
         # 프리셋 저장 위치 (현업식: OS별 user-data 폴더, 단 기존 block_list가 있으면 그대로 사용)
         preset_dir = _default_preset_dir()
@@ -281,6 +344,10 @@ class StudyWithLogic(StudyWithUI):
 
     def switch_to_pip(self):
         """메인 창을 숨기고 PIP 창을 보여줍니다."""
+        if self.pip_window is None:
+            QMessageBox.warning(self, "오류", "PIP 창을 초기화할 수 없습니다.")
+            return
+        
         self.is_pip_mode = True
         self.hide() # 메인 창 숨김
         
@@ -294,21 +361,87 @@ class StudyWithLogic(StudyWithUI):
     def return_from_pip(self):
         """PIP 창을 숨기고 메인 창을 보여줍니다."""
         self.is_pip_mode = False
-        self.pip_window.hide() # PIP 창 숨김
+        if self.pip_window is not None:
+            self.pip_window.hide() # PIP 창 숨김
         self.show() # 메인 창 표시
         self.handle_log("🖥️ 메인 모드로 복귀했습니다.", "INFO")
+    
+    def show_stats(self):
+        """통계 창 표시"""
+        self.stats_window.update_statistics()
+        self.stats_window.show()
+        self.stats_window.raise_()
+        self.stats_window.activateWindow()
+    
+    def update_ui_rank(self):
+        """현재 등급에 따라 UI 스타일 업데이트"""
+        try:
+            if not hasattr(self, 'session_manager') or self.session_manager is None:
+                return
+            
+            stats = self.session_manager.get_statistics()
+            rank = stats.get("rank", "BRONZE")
+            
+            # 메인 창 스타일 업데이트 (심플 모드 상태 확인)
+            if hasattr(self, 'simple_mode_check'):
+                simple_mode = self.simple_mode_check.isChecked()
+                if hasattr(self, 'simple_mode'):
+                    self.simple_mode = simple_mode
+            self.update_rank_style(rank)
+            
+            # PIP 창 스타일 업데이트 (심플 모드 상태 확인)
+            if hasattr(self, 'pip_window') and self.pip_window:
+                simple_mode = hasattr(self, 'simple_mode_check') and self.simple_mode_check.isChecked()
+                self.pip_window.update_rank_style(rank, simple_mode=simple_mode)
+            self.handle_log(f"등급 업데이트: {rank}", "INFO")
+        except Exception as e:
+            self.handle_log(f"등급 업데이트 오류: {e}", "ERROR")
+            import traceback
+            traceback.print_exc()
 
     def sync_pip_ui(self):
         """현재 상태(시간, 모드)를 PIP 창 라벨에 복사합니다."""
-        self.pip_window.timer_label.setText(self.timer_label.text())
-        self.pip_window.status_label.setText(self.status_label.text())
-        # 상태에 따라 색상 동기화
-        if self.current_state == "FOCUS":
-             self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #D08770;")
-        elif self.current_state == "BREAK":
-             self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #A3BE8C;")
-        else:
-             self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #ECEFF4;")
+        if self.pip_window is None:
+            return
+        
+        try:
+            self.pip_window.timer_label.setText(self.timer_label.text())
+            self.pip_window.status_label.setText(self.status_label.text())
+            
+            # 심플 모드 확인
+            simple_mode = hasattr(self, 'simple_mode_check') and self.simple_mode_check.isChecked()
+            
+            # 등급에 따른 테마 가져오기
+            if self.session_manager is None:
+                theme = get_theme("BRONZE")
+            else:
+                stats = self.session_manager.get_statistics()
+                rank = stats.get("rank", "BRONZE")
+                theme = get_theme(rank)
+            
+            # 상태에 따라 색상 동기화 (심플 모드면 기본 색상, 아니면 등급 테마 반영)
+            if simple_mode:
+                # 심플 모드일 때는 기본 색상 사용
+                if self.current_state == "FOCUS":
+                    self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #D08770;")
+                elif self.current_state == "BREAK":
+                    self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #A3BE8C;")
+                else:
+                    self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #ECEFF4;")
+            else:
+                # 티어별 색상 사용
+                if self.current_state == "FOCUS":
+                     self.pip_window.status_label.setStyleSheet(
+                         f"font-weight: bold; font-size: 14px; color: {theme['accent_color']};"
+                     )
+                elif self.current_state == "BREAK":
+                     self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #A3BE8C;")
+                else:
+                     self.pip_window.status_label.setStyleSheet(
+                         f"font-weight: bold; font-size: 14px; color: {theme['text_color']};"
+                     )
+        except Exception as e:
+            self.handle_log(f"PIP UI 동기화 오류: {e}", "ERROR")
 
     # --- 프리셋 저장 기능 ---
     def save_preset(self):
@@ -381,6 +514,29 @@ class StudyWithLogic(StudyWithUI):
     def toggle_log_mode(self, state):
         self.log_mode = (state == 2)
         self.log_viewer.setVisible(self.log_mode)
+    
+    def toggle_simple_mode(self, state):
+        """심플 모드 토글 (UI에서 호출)"""
+        self.simple_mode = (state == 2)  # 2 = Qt.CheckState.Checked
+        # UI의 심플 모드 상태 업데이트
+        if hasattr(self, 'simple_mode'):
+            self.simple_mode = (state == 2)
+        
+        # 현재 등급 가져오기
+        if hasattr(self, 'session_manager') and self.session_manager is not None:
+            stats = self.session_manager.get_statistics()
+            rank = stats.get("rank", "BRONZE")
+        else:
+            rank = "BRONZE"
+        
+        # 스타일 업데이트
+        self.update_rank_style(rank)
+        
+        # PIP 창도 업데이트
+        if hasattr(self, 'pip_window') and self.pip_window:
+            self.pip_window.update_rank_style(rank, simple_mode=self.simple_mode)
+        
+        self.handle_log(f"심플 모드 {'활성화' if self.simple_mode else '비활성화'}", "INFO")
 
     def handle_log(self, message, msg_type="INFO"):
         """로그 발생 시 처리"""
@@ -426,6 +582,10 @@ class StudyWithLogic(StudyWithUI):
             self.is_running = True
             self.current_cycle = 1
             self.total_cycles = self.cycle_input.value()
+            self.session_start_time = datetime.now()
+            self.total_focus_seconds = 0
+            self.focus_duration = self.focus_input.value()
+            self.break_duration = self.break_input.value()
             
             self.start_btn.setText("세션 중지")
             self.start_btn.setStyleSheet("background-color: #BF616A; color: white;")
@@ -440,7 +600,36 @@ class StudyWithLogic(StudyWithUI):
         self.timer.stop()
         self.is_running = False
         self.disable_blocking()
-
+        
+        # 세션 기록 저장
+        if self.session_start_time and self.session_manager is not None:
+            try:
+                end_time = datetime.now()
+                total_focus_minutes = self.total_focus_seconds // 60
+                completed_cycles = self.current_cycle - 1 if self.current_state == "FOCUS" else self.current_cycle
+                
+                self.session_manager.add_session(
+                    start_time=self.session_start_time,
+                    end_time=end_time,
+                    total_focus_minutes=total_focus_minutes,
+                    total_cycles=self.total_cycles,
+                    completed_cycles=completed_cycles,
+                    focus_duration=self.focus_duration,
+                    break_duration=self.break_duration
+                )
+                self.session_start_time = None
+                self.total_focus_seconds = 0
+                
+                # 통계 및 등급 업데이트
+                if hasattr(self, 'stats_window') and self.stats_window:
+                    self.stats_window.update_statistics()
+                self.update_ui_rank()
+                self.handle_log(f"세션 기록 저장 완료: {total_focus_minutes}분 집중, {completed_cycles}/{self.total_cycles} 사이클", "SUCCESS")
+            except Exception as e:
+                self.handle_log(f"세션 저장 오류: {e}", "ERROR")
+                import traceback
+                traceback.print_exc()
+        
         self.current_state = "READY"
         self.timer_label.setText("00:00")
         self.status_label.setText("준비 상태")
@@ -484,11 +673,17 @@ class StudyWithLogic(StudyWithUI):
             
             # [중요] 메인 창과 PIP 창 모두 시간 업데이트
             self.timer_label.setText(time_str)
-            if self.is_pip_mode:
-                self.pip_window.timer_label.setText(time_str)
+            if self.is_pip_mode and self.pip_window is not None:
+                try:
+                    self.pip_window.timer_label.setText(time_str)
+                except Exception as e:
+                    self.handle_log(f"PIP 타이머 업데이트 오류: {e}", "ERROR")
 
             if self.time_left > 0:
                 self.time_left -= 1
+                # 집중 모드일 때만 집중 시간 카운트
+                if self.current_state == "FOCUS":
+                    self.total_focus_seconds += 1
             else:
                 self.timer.stop()
                 if self.current_state == "FOCUS":
@@ -504,8 +699,52 @@ class StudyWithLogic(StudyWithUI):
 
     def finish_all_sessions(self):
         self.handle_log("모든 세션 완료!", "SUCCESS")
+        
+        # 세션 기록 저장 (stop_session에서 처리되지만, 완료된 사이클 수를 정확히 반영)
+        if self.session_start_time and self.session_manager is not None:
+            try:
+                end_time = datetime.now()
+                total_focus_minutes = self.total_focus_seconds // 60
+                
+                self.session_manager.add_session(
+                    start_time=self.session_start_time,
+                    end_time=end_time,
+                    total_focus_minutes=total_focus_minutes,
+                    total_cycles=self.total_cycles,
+                    completed_cycles=self.total_cycles,  # 모든 사이클 완료
+                    focus_duration=self.focus_duration,
+                    break_duration=self.break_duration
+                )
+                self.session_start_time = None
+                self.total_focus_seconds = 0
+                
+                # 통계 및 등급 업데이트
+                if hasattr(self, 'stats_window') and self.stats_window:
+                    self.stats_window.update_statistics()
+                self.update_ui_rank()
+                self.handle_log(f"세션 완료 기록 저장: {total_focus_minutes}분 집중, 모든 사이클 완료", "SUCCESS")
+            except Exception as e:
+                self.handle_log(f"세션 저장 오류: {e}", "ERROR")
+                import traceback
+                traceback.print_exc()
+        
         self.stop_session()
-        QMessageBox.information(self, "완료", "모든 집중 세션을 완료했습니다! 🎉")
+        
+        # 통계 표시
+        try:
+            if self.session_manager is not None:
+                stats = self.session_manager.get_statistics()
+                theme = get_theme(stats.get("rank", "BRONZE"))
+                message = f"모든 집중 세션을 완료했습니다! 🎉\n\n"
+                message += f"현재 등급: {theme['emoji']} {stats['rank_display']} {theme['emoji']}\n"
+                message += f"총 점수: {stats['total_score']:,}점\n"
+                message += f"총 집중 시간: {stats['total_focus_hours']:.1f}시간"
+            else:
+                message = "모든 집중 세션을 완료했습니다! 🎉"
+            QMessageBox.information(self, "완료", message)
+        except Exception as e:
+            self.handle_log(f"완료 메시지 표시 오류: {e}", "ERROR")
+            QMessageBox.information(self, "완료", "모든 집중 세션을 완료했습니다! 🎉")
 
 def main() -> None:
     # Windows에서 콘솔 창 숨기기
@@ -519,23 +758,62 @@ def main() -> None:
             user32.ShowWindow(hwnd, 0)  # 0 = SW_HIDE
     
     # Windows에서만 관리자 권한 승격 시도 (Linux/macOS는 여기서 자동 승격 불가)
+    # 주의: run_as_admin()이 호출되면 현재 프로세스가 종료되고 새 프로세스가 시작됨
     if platform.system() == "Windows" and not is_admin():
-        run_as_admin()
+        try:
+            run_as_admin()
+            # run_as_admin()이 성공하면 여기 도달하지 않음 (sys.exit 호출됨)
+            # 하지만 실패하면 계속 진행
+        except Exception as e:
+            print(f"관리자 권한 승격 실패: {e}")
+            # 관리자 권한 없이 계속 진행 (일부 기능 제한될 수 있음)
 
-    app = QApplication(sys.argv)
+    try:
+        app = QApplication(sys.argv)
 
-    font_file = resource_path("font.ttf")
-    font_id = QFontDatabase.addApplicationFont(font_file)
-    if font_id != -1:
-        font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
-        app.setFont(QFont(font_family, 10))
-        print(f"폰트 로드 성공: {font_family}")
-    else:
-        print("폰트 파일을 찾을 수 없거나 로드 실패 (기본 폰트 사용)")
+        # 커스텀 폰트 로드
+        font_file = resource_path("font.ttf")
+        custom_font_name = None
+        if os.path.exists(font_file):
+            font_id = QFontDatabase.addApplicationFont(font_file)
+            if font_id != -1:
+                font_families = QFontDatabase.applicationFontFamilies(font_id)
+                if font_families:
+                    custom_font_name = font_families[0]
+                    # 전역 폰트 설정
+                    default_font = QFont(custom_font_name, 14)
+                    app.setFont(default_font)
+                    print(f"✅ 커스텀 폰트 로드 성공: {custom_font_name}")
+                else:
+                    print("⚠️ 폰트 파일에서 폰트 패밀리를 찾을 수 없습니다.")
+            else:
+                print(f"⚠️ 폰트 파일 로드 실패: {font_file}")
+        else:
+            print(f"⚠️ 폰트 파일을 찾을 수 없습니다: {font_file}")
 
-    window = StudyWithLogic()
-    window.show()
-    sys.exit(app.exec())
+        # rank_themes에 폰트 이름 전달
+        if custom_font_name:
+            from .rank_themes import set_custom_font_name
+            set_custom_font_name(custom_font_name)
+
+        window = StudyWithLogic()
+        window.show()
+        sys.exit(app.exec())
+    except Exception as e:
+        print(f"애플리케이션 실행 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        # 오류 발생 시에도 콘솔 창을 다시 보여서 오류 메시지 확인 가능하게
+        if platform.system() == "Windows":
+            try:
+                kernel32 = ctypes.windll.kernel32
+                user32 = ctypes.windll.user32
+                hwnd = kernel32.GetConsoleWindow()
+                if hwnd:
+                    user32.ShowWindow(hwnd, 1)  # 1 = SW_SHOW
+            except:
+                pass
+        sys.exit(1)
 
 
 if __name__ == "__main__":
