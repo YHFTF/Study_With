@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import platform
+import random
 import shutil
 import sys
 import time
@@ -138,7 +139,8 @@ class ApiServerThread(QThread):
         self.block_sites = sites
 
 class BlockerWorker(QThread):
-    log_signal = pyqtSignal(str, str) 
+    log_signal = pyqtSignal(str, str)
+    blocked_signal = pyqtSignal(str)  # 차단 발생 시 프로그램 이름 전달
 
     def __init__(self, block_keywords):
         super().__init__()
@@ -183,6 +185,7 @@ class BlockerWorker(QThread):
                             if keyword in proc_name_lower:
                                 proc.kill() # 강제 종료
                                 self.log_signal.emit(f"🚫 프로그램 차단됨: {proc_name} ('{keyword}' 포함)", "SUCCESS")
+                                self.blocked_signal.emit(proc_name)  # 차단 발생 시그널 전송
                                 break # 한 번 죽였으면 다음 프로세스로 넘어감
 
                     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -245,6 +248,22 @@ class StudyWithLogic(StudyWithUI):
         self.audio_output = QAudioOutput()
         self.player.setAudioOutput(self.audio_output)
         self.audio_output.setVolume(1.0) # 볼륨 100% (0.0 ~ 1.0)
+        
+        # 격려 메시지 리스트
+        self.encouragement_messages = [
+            "잘하고 있어요! 집중력을 유지하고 계세요! 💪",
+            "훌륭해요! 방해 요소를 차단하고 계시네요! 🌟",
+            "좋아요! 이렇게 계속 집중하시면 목표를 달성할 수 있어요! ✨",
+            "멋져요! 집중하는 모습이 정말 대단합니다! 🎯",
+            "화이팅! 작은 선택이 큰 성과를 만들어냅니다! 🚀",
+            "대단해요! 집중력을 지키는 당신이 멋집니다! ⭐",
+            "잘하고 계세요! 이 순간의 노력이 미래를 만듭니다! 🌈",
+            "훌륭한 선택이에요! 집중하는 시간이 소중합니다! 💎",
+            "좋아요! 방해 요소를 멀리하고 목표에 집중하세요! 🎪",
+            "멋진 모습이에요! 계속 이렇게 집중하시면 성공할 거예요! 🏆",
+            "화이팅! 지금의 노력이 당신을 더 강하게 만듭니다! 💫",
+            "잘하고 있어요! 집중하는 시간이 당신의 자산입니다! 🌟"
+        ]
 
     def play_sound(self, file_name):
         """번들된 sounds 리소스의 mp3 파일을 재생합니다."""
@@ -379,8 +398,15 @@ class StudyWithLogic(StudyWithUI):
         if self.blocker_thread is None or not self.blocker_thread.isRunning():
             self.blocker_thread = BlockerWorker(self.current_apps)
             self.blocker_thread.log_signal.connect(self.handle_log)
+            self.blocker_thread.blocked_signal.connect(self.show_encouragement_message)
             self.blocker_thread.start()
         self.handle_log("🛡️ 차단 기능이 활성화되었습니다.", "INFO")
+    
+    def show_encouragement_message(self, proc_name):
+        """차단 발생 시 격려 메시지를 랜덤으로 표시합니다."""
+        message = random.choice(self.encouragement_messages)
+        title = f"🚫 프로그램 차단됨: {proc_name}"
+        QMessageBox.information(self, title, message)
 
     def disable_blocking(self):
         """차단 기능을 비활성화합니다."""
@@ -482,6 +508,16 @@ class StudyWithLogic(StudyWithUI):
         QMessageBox.information(self, "완료", "모든 집중 세션을 완료했습니다! 🎉")
 
 def main() -> None:
+    # Windows에서 콘솔 창 숨기기
+    if platform.system() == "Windows":
+        import ctypes
+        # 콘솔 창 숨기기
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            user32.ShowWindow(hwnd, 0)  # 0 = SW_HIDE
+    
     # Windows에서만 관리자 권한 승격 시도 (Linux/macOS는 여기서 자동 승격 불가)
     if platform.system() == "Windows" and not is_admin():
         run_as_admin()
