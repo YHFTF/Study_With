@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Study With Blocker",
+  "version": "1.0",
+  "description": "Python 앱과 연동하여 사이트를 차단합니다.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "alarms" 
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:5000/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
