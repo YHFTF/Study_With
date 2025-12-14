@@ -9,6 +9,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import psutil
 from PyQt6.QtCore import QThread, QTimer, Qt, QUrl, pyqtSignal
@@ -86,6 +87,52 @@ def _ensure_default_preset(preset_dir: Path) -> None:
         except Exception:
             pass
 
+
+def _get_config_dir() -> Path:
+    """설정 파일 저장 디렉토리 반환"""
+    system = platform.system()
+    if system == "Windows":
+        base = Path(os.getenv("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+        config_dir = base / "StudyWith" / "config"
+    elif system == "Darwin":
+        config_dir = Path.home() / "Library" / "Application Support" / "StudyWith" / "config"
+    else:
+        base = Path(os.getenv("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+        config_dir = base / "study-with" / "config"
+    
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
+
+
+def _get_last_preset_file() -> Path:
+    """마지막 프리셋 경로 저장 파일 반환"""
+    return _get_config_dir() / "last_preset.txt"
+
+
+def save_last_preset_path(preset_path: str) -> None:
+    """마지막 로딩한 프리셋 경로 저장"""
+    try:
+        last_preset_file = _get_last_preset_file()
+        with open(last_preset_file, 'w', encoding='utf-8') as f:
+            f.write(preset_path)
+    except Exception as e:
+        print(f"마지막 프리셋 경로 저장 실패: {e}")
+
+
+def load_last_preset_path() -> Optional[str]:
+    """마지막 로딩한 프리셋 경로 불러오기"""
+    try:
+        last_preset_file = _get_last_preset_file()
+        if last_preset_file.exists():
+            with open(last_preset_file, 'r', encoding='utf-8') as f:
+                path = f.read().strip()
+                # 파일이 존재하는지 확인
+                if path and Path(path).exists():
+                    return path
+    except Exception as e:
+        print(f"마지막 프리셋 경로 불러오기 실패: {e}")
+    return None
+
 # ---------------------------------------------------------
 # [로직 1] 관리자 권한 체크
 # ---------------------------------------------------------
@@ -120,7 +167,6 @@ def run_as_admin():
             # 사용자가 취소했거나 실패한 경우
             return False
     except Exception as e:
-        # 초기화 전이므로 print 사용
         print(f"관리자 권한 승격 오류: {e}")
         return False
 
@@ -224,7 +270,6 @@ class StudyWithLogic(StudyWithUI):
         # 상태 변수 초기화
         self.is_running = False
         self.log_mode = False
-        self.simple_mode = False  # 심플 모드 상태
         self.current_state = "READY"
         self.time_left = 0
         self.total_cycles = 0
@@ -235,9 +280,8 @@ class StudyWithLogic(StudyWithUI):
         # 세션 기록 관리 (먼저 초기화)
         try:
             self.session_manager = SessionManager()
-            self.handle_log("세션 매니저 초기화 완료", "INFO")
         except Exception as e:
-            self.handle_log(f"세션 매니저 초기화 오류: {e}", "ERROR")
+            print(f"세션 매니저 초기화 오류: {e}")
             import traceback
             traceback.print_exc()
             # 기본값으로 계속 진행
@@ -246,9 +290,8 @@ class StudyWithLogic(StudyWithUI):
         # PIP 창 초기화 (세션 매니저 이후)
         try:
             self.pip_window = PipUI()
-            self.handle_log("PIP 창 초기화 완료", "INFO")
         except Exception as e:
-            self.handle_log(f"PIP 창 초기화 오류: {e}", "ERROR")
+            print(f"PIP 창 초기화 오류: {e}")
             import traceback
             traceback.print_exc()
             self.pip_window = None
@@ -270,9 +313,9 @@ class StudyWithLogic(StudyWithUI):
         # ★ UI 이벤트 연결 (버튼 클릭 등)
         self.start_btn.clicked.connect(self.toggle_session)
         self.save_btn.clicked.connect(self.save_preset)
-        self.load_btn.clicked.connect(self.load_preset)
-        self.simple_mode_check.stateChanged.connect(self.toggle_simple_mode)
+        self.load_btn.clicked.connect(lambda: self.load_preset())  # 명시적으로 파라미터 없이 호출
         self.log_check.stateChanged.connect(self.toggle_log_mode)
+        self.simple_mode_check.stateChanged.connect(self.toggle_simple_mode)  # 심플 모드 체크박스 연결
 
         self.pip_btn.clicked.connect(self.switch_to_pip)
         if self.pip_window is not None:
@@ -282,14 +325,14 @@ class StudyWithLogic(StudyWithUI):
         try:
             if self.session_manager is not None:
                 from .ui import StatsWindow
-                # 로그 핸들러를 전달하여 모든 로그를 프로그램 내부 로그 모드로 출력
+                # 로그 핸들러를 전달하여 통계 창에서도 로그가 표시되도록 함
                 self.stats_window = StatsWindow(self.session_manager, log_handler=self.handle_log)
                 self.stats_btn.clicked.connect(self.show_stats)
             else:
                 self.stats_window = None
-                self.handle_log("세션 매니저가 없어 통계 창을 초기화할 수 없습니다.", "WARNING")
+                print("세션 매니저가 없어 통계 창을 초기화할 수 없습니다.")
         except Exception as e:
-            self.handle_log(f"통계 창 초기화 오류: {e}", "ERROR")
+            print(f"통계 창 초기화 오류: {e}")
             import traceback
             traceback.print_exc()
             self.stats_window = None
@@ -298,13 +341,22 @@ class StudyWithLogic(StudyWithUI):
         try:
             self.update_ui_rank()
         except Exception as e:
-            self.handle_log(f"등급 스타일 적용 오류: {e}", "ERROR")
+            print(f"등급 스타일 적용 오류: {e}")
             # 기본 스타일 유지
 
         # 프리셋 저장 위치 (현업식: OS별 user-data 폴더, 단 기존 block_list가 있으면 그대로 사용)
         preset_dir = _default_preset_dir()
         _ensure_default_preset(preset_dir)
         self.preset_dir = str(preset_dir)
+
+        # 이전에 로딩했던 프리셋 자동 로딩
+        last_preset = load_last_preset_path()
+        if last_preset:
+            try:
+                self.load_preset(last_preset)
+                self.handle_log(f"📂 이전 프리셋 자동 로드: {os.path.basename(last_preset)}", "INFO")
+            except Exception as e:
+                print(f"이전 프리셋 자동 로딩 실패: {e}")
 
         #사운드 플레이어 설정
         self.player = QMediaPlayer()
@@ -382,20 +434,14 @@ class StudyWithLogic(StudyWithUI):
             stats = self.session_manager.get_statistics()
             rank = stats.get("rank", "BRONZE")
             
-            # 메인 창 스타일 업데이트 (심플 모드 상태 확인)
-            if hasattr(self, 'simple_mode_check'):
-                simple_mode = self.simple_mode_check.isChecked()
-                if hasattr(self, 'simple_mode'):
-                    self.simple_mode = simple_mode
+            # 메인 창 스타일 업데이트
             self.update_rank_style(rank)
             
-            # PIP 창 스타일 업데이트 (심플 모드 상태 확인)
+            # PIP 창 스타일 업데이트
             if hasattr(self, 'pip_window') and self.pip_window:
-                simple_mode = hasattr(self, 'simple_mode_check') and self.simple_mode_check.isChecked()
-                self.pip_window.update_rank_style(rank, simple_mode=simple_mode)
-            self.handle_log(f"등급 업데이트: {rank}", "INFO")
+                self.pip_window.update_rank_style(rank)
         except Exception as e:
-            self.handle_log(f"등급 업데이트 오류: {e}", "ERROR")
+            print(f"등급 업데이트 오류: {e}")
             import traceback
             traceback.print_exc()
 
@@ -408,9 +454,6 @@ class StudyWithLogic(StudyWithUI):
             self.pip_window.timer_label.setText(self.timer_label.text())
             self.pip_window.status_label.setText(self.status_label.text())
             
-            # 심플 모드 확인
-            simple_mode = hasattr(self, 'simple_mode_check') and self.simple_mode_check.isChecked()
-            
             # 등급에 따른 테마 가져오기
             if self.session_manager is None:
                 theme = get_theme("BRONZE")
@@ -419,29 +462,19 @@ class StudyWithLogic(StudyWithUI):
                 rank = stats.get("rank", "BRONZE")
                 theme = get_theme(rank)
             
-            # 상태에 따라 색상 동기화 (심플 모드면 기본 색상, 아니면 등급 테마 반영)
-            if simple_mode:
-                # 심플 모드일 때는 기본 색상 사용
-                if self.current_state == "FOCUS":
-                    self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #D08770;")
-                elif self.current_state == "BREAK":
-                    self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #A3BE8C;")
-                else:
-                    self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #ECEFF4;")
+            # 상태에 따라 색상 동기화 (등급 테마 반영)
+            if self.current_state == "FOCUS":
+                 self.pip_window.status_label.setStyleSheet(
+                     f"font-weight: bold; font-size: 14px; color: {theme['accent_color']};"
+                 )
+            elif self.current_state == "BREAK":
+                 self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #A3BE8C;")
             else:
-                # 티어별 색상 사용
-                if self.current_state == "FOCUS":
-                     self.pip_window.status_label.setStyleSheet(
-                         f"font-weight: bold; font-size: 14px; color: {theme['accent_color']};"
-                     )
-                elif self.current_state == "BREAK":
-                     self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #A3BE8C;")
-                else:
-                     self.pip_window.status_label.setStyleSheet(
-                         f"font-weight: bold; font-size: 14px; color: {theme['text_color']};"
-                     )
+                 self.pip_window.status_label.setStyleSheet(
+                     f"font-weight: bold; font-size: 14px; color: {theme['text_color']};"
+                 )
         except Exception as e:
-            self.handle_log(f"PIP UI 동기화 오류: {e}", "ERROR")
+            print(f"PIP UI 동기화 오류: {e}")
 
     # --- 프리셋 저장 기능 ---
     def save_preset(self):
@@ -473,14 +506,23 @@ class StudyWithLogic(StudyWithUI):
                 QMessageBox.critical(self, "오류", f"저장 실패: {e}")
 
     # --- 프리셋 불러오기 기능 ---
-    def load_preset(self):
-        # 파일 열기 대화상자 열기
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, 
-            "프리셋 불러오기", 
-            self.preset_dir, 
-            "Text Files (*.txt)"
-        )
+    def load_preset(self, preset_path: Optional[str] = None):
+        """
+        프리셋 불러오기
+        
+        Args:
+            preset_path: 불러올 프리셋 파일 경로 (None이면 파일 대화상자 표시)
+        """
+        # 파일 경로가 제공되지 않으면 파일 대화상자 열기
+        if preset_path is None:
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, 
+                "프리셋 불러오기", 
+                self.preset_dir, 
+                "Text Files (*.txt)"
+            )
+        else:
+            file_path = preset_path
 
         if file_path:
             try:
@@ -504,39 +546,23 @@ class StudyWithLogic(StudyWithUI):
                 self.site_input.setText(sites_text)
                 self.app_input.setText(apps_text)
                 
+                # 마지막 프리셋 경로 저장
+                save_last_preset_path(file_path)
+                
                 self.handle_log(f"📂 프리셋 로드 완료: {os.path.basename(file_path)}", "INFO")
                 
             except Exception as e:
-                QMessageBox.critical(self, "오류", f"불러오기 실패: {e}")
+                if preset_path is None:  # 사용자가 직접 선택한 경우에만 오류 메시지 표시
+                    QMessageBox.critical(self, "오류", f"불러오기 실패: {e}")
+                else:
+                    # 자동 로딩 실패는 조용히 처리
+                    print(f"자동 프리셋 로딩 실패: {e}")
         
     # --- 로직 메서드 구현 ---
     
     def toggle_log_mode(self, state):
         self.log_mode = (state == 2)
         self.log_viewer.setVisible(self.log_mode)
-    
-    def toggle_simple_mode(self, state):
-        """심플 모드 토글 (UI에서 호출)"""
-        self.simple_mode = (state == 2)  # 2 = Qt.CheckState.Checked
-        # UI의 심플 모드 상태 업데이트
-        if hasattr(self, 'simple_mode'):
-            self.simple_mode = (state == 2)
-        
-        # 현재 등급 가져오기
-        if hasattr(self, 'session_manager') and self.session_manager is not None:
-            stats = self.session_manager.get_statistics()
-            rank = stats.get("rank", "BRONZE")
-        else:
-            rank = "BRONZE"
-        
-        # 스타일 업데이트
-        self.update_rank_style(rank)
-        
-        # PIP 창도 업데이트
-        if hasattr(self, 'pip_window') and self.pip_window:
-            self.pip_window.update_rank_style(rank, simple_mode=self.simple_mode)
-        
-        self.handle_log(f"심플 모드 {'활성화' if self.simple_mode else '비활성화'}", "INFO")
 
     def handle_log(self, message, msg_type="INFO"):
         """로그 발생 시 처리"""
@@ -624,12 +650,11 @@ class StudyWithLogic(StudyWithUI):
                 if hasattr(self, 'stats_window') and self.stats_window:
                     self.stats_window.update_statistics()
                 self.update_ui_rank()
-                self.handle_log(f"세션 기록 저장 완료: {total_focus_minutes}분 집중, {completed_cycles}/{self.total_cycles} 사이클", "SUCCESS")
             except Exception as e:
-                self.handle_log(f"세션 저장 오류: {e}", "ERROR")
+                print(f"세션 저장 오류: {e}")
                 import traceback
                 traceback.print_exc()
-        
+
         self.current_state = "READY"
         self.timer_label.setText("00:00")
         self.status_label.setText("준비 상태")
@@ -677,7 +702,7 @@ class StudyWithLogic(StudyWithUI):
                 try:
                     self.pip_window.timer_label.setText(time_str)
                 except Exception as e:
-                    self.handle_log(f"PIP 타이머 업데이트 오류: {e}", "ERROR")
+                    print(f"PIP 타이머 업데이트 오류: {e}")
 
             if self.time_left > 0:
                 self.time_left -= 1
@@ -722,9 +747,8 @@ class StudyWithLogic(StudyWithUI):
                 if hasattr(self, 'stats_window') and self.stats_window:
                     self.stats_window.update_statistics()
                 self.update_ui_rank()
-                self.handle_log(f"세션 완료 기록 저장: {total_focus_minutes}분 집중, 모든 사이클 완료", "SUCCESS")
             except Exception as e:
-                self.handle_log(f"세션 저장 오류: {e}", "ERROR")
+                print(f"세션 저장 오류: {e}")
                 import traceback
                 traceback.print_exc()
         
@@ -743,7 +767,7 @@ class StudyWithLogic(StudyWithUI):
                 message = "모든 집중 세션을 완료했습니다! 🎉"
             QMessageBox.information(self, "완료", message)
         except Exception as e:
-            self.handle_log(f"완료 메시지 표시 오류: {e}", "ERROR")
+            print(f"완료 메시지 표시 오류: {e}")
             QMessageBox.information(self, "완료", "모든 집중 세션을 완료했습니다! 🎉")
 
 def main() -> None:
@@ -771,30 +795,14 @@ def main() -> None:
     try:
         app = QApplication(sys.argv)
 
-        # 커스텀 폰트 로드
         font_file = resource_path("font.ttf")
-        custom_font_name = None
-        if os.path.exists(font_file):
-            font_id = QFontDatabase.addApplicationFont(font_file)
-            if font_id != -1:
-                font_families = QFontDatabase.applicationFontFamilies(font_id)
-                if font_families:
-                    custom_font_name = font_families[0]
-                    # 전역 폰트 설정
-                    default_font = QFont(custom_font_name, 14)
-                    app.setFont(default_font)
-                    print(f"✅ 커스텀 폰트 로드 성공: {custom_font_name}")
-                else:
-                    print("⚠️ 폰트 파일에서 폰트 패밀리를 찾을 수 없습니다.")
-            else:
-                print(f"⚠️ 폰트 파일 로드 실패: {font_file}")
+        font_id = QFontDatabase.addApplicationFont(font_file)
+        if font_id != -1:
+            font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+            app.setFont(QFont(font_family, 10))
+            print(f"폰트 로드 성공: {font_family}")
         else:
-            print(f"⚠️ 폰트 파일을 찾을 수 없습니다: {font_file}")
-
-        # rank_themes에 폰트 이름 전달
-        if custom_font_name:
-            from .rank_themes import set_custom_font_name
-            set_custom_font_name(custom_font_name)
+            print("폰트 파일을 찾을 수 없거나 로드 실패 (기본 폰트 사용)")
 
         window = StudyWithLogic()
         window.show()
