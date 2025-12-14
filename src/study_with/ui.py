@@ -802,6 +802,50 @@ class StudyWithUI(QMainWindow):
 
         layout.addLayout(header_layout)
 
+        # 1-1. 계정/클라우드 동기화 (선택 기능)
+        account_frame = QFrame()
+        account_frame.setObjectName("AccountFrame")
+        account_layout = QVBoxLayout()
+        account_frame.setLayout(account_layout)
+
+        self.cloud_status_label = QLabel("☁️ 클라우드: 로그인 안 됨")
+        self.cloud_status_label.setStyleSheet("color: #D8DEE9; font-size: 12px;")
+        account_layout.addWidget(self.cloud_status_label)
+
+        form = QFormLayout()
+        self.cloud_server_input = QLineEdit()
+        self.cloud_server_input.setPlaceholderText("예: https://api.example.com (끝 / 없이)")
+        form.addRow("서버 URL:", self.cloud_server_input)
+
+        self.cloud_username_input = QLineEdit()
+        self.cloud_username_input.setPlaceholderText("아이디(Username)")
+        form.addRow("아이디:", self.cloud_username_input)
+
+        self.cloud_password_input = QLineEdit()
+        self.cloud_password_input.setPlaceholderText("비밀번호")
+        self.cloud_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("비밀번호:", self.cloud_password_input)
+
+        account_layout.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        self.cloud_login_btn = QPushButton("로그인")
+        self.cloud_login_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cloud_register_btn = QPushButton("회원가입")
+        self.cloud_register_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cloud_sync_btn = QPushButton("프리셋/레벨 동기화")
+        self.cloud_sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cloud_logout_btn = QPushButton("로그아웃")
+        self.cloud_logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        btn_row.addWidget(self.cloud_login_btn)
+        btn_row.addWidget(self.cloud_register_btn)
+        btn_row.addWidget(self.cloud_logout_btn)
+        account_layout.addLayout(btn_row)
+        account_layout.addWidget(self.cloud_sync_btn)
+
+        layout.addWidget(account_frame)
+
         # 2. 타이머
         self.timer_label = QLabel("00:00")
         self.timer_label.setObjectName("TimerLabel")
