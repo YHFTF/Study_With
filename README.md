@@ -1,9 +1,5 @@
 ## 📝 Study With - 집중 부스터 타이머
 
-[](https://www.google.com/search?q=https://github.com/YOUR_GITHUB_USER/YOUR_REPO)
-[](https://www.google.com/search?q=LICENSE)
-[](https://www.python.org/)
-
 집중 세션(뽀모도로) 동안 방해 요소를 완벽하게 차단하고 생산성을 극대화하기 위해 설계된 데스크톱 애플리케이션입니다. Python (PyQt6) 기반으로 개발되었으며, Chrome 확장 프로그램과의 연동을 통해 웹사이트 차단 기능을 강력하게 제공합니다.
 
 ### 🌟 주요 기능
@@ -24,27 +20,27 @@
 Python 3.8 이상이 설치되어 있어야 합니다. 터미널(CMD/PowerShell)에서 필요한 라이브러리를 설치합니다.
 
 ```bash
-pip install PyQt6 psutil flask flask-cors
+pip install -r requirements.txt
 ```
 
 #### 2\. Chrome 확장 프로그램 설치 (웹사이트 차단 필수)
 
 웹사이트 차단 기능을 사용하려면 반드시 크롬 확장 프로그램과 연동해야 합니다.
 
-1.  **확장 프로그램 폴더 생성:** 프로젝트 루트 폴더에 `StudyWithExtension` 폴더를 생성하고, 내부에 `manifest.json`, `background.js`, `block.html` 파일을 복사하여 넣습니다.
+1.  **확장 프로그램 로드:** 이 저장소의 `extensions/chrome/` 폴더를 그대로 로드합니다.
 2.  **크롬 설정:**
       * 크롬 주소창에 `chrome://extensions`를 입력합니다.
       * 우측 상단 **"개발자 모드"** 스위치를 \*\*켜기(ON)\*\*로 설정합니다.
-      * **"압축해제된 확장 프로그램을 로드합니다"** 버튼을 클릭하고, 생성한 **`StudyWithExtension`** 폴더를 선택합니다.
-3.  **크롬 보안 설정 해제:** `hosts` 파일 차단과 마찬가지로, 안정적인 차단을 위해 크롬의 **'보안 DNS' 기능을 해제**해야 합니다. (설정 \> 개인정보 및 보안 \> 보안 \> 보안 DNS 사용 OFF)
+      * **"압축해제된 확장 프로그램을 로드합니다"** 버튼을 클릭하고 **`extensions/chrome/`** 폴더를 선택합니다.
 
 #### 3\. 애플리케이션 실행
 
-Hosts 파일 수정 및 API 서버(포트 5000) 접근을 위해 **관리자 권한**으로 실행해야 합니다.
+Windows에서는(필요 시) 관리자 권한으로 실행될 수 있습니다. Linux/macOS에서는 자동 승격이 불가하므로 필요하다면 직접 권한을 올려 실행하세요.
 
 ```bash
-# 관리자 권한으로 터미널 실행 후
 python main.py
+# 또는 (패키지 방식)
+# python -m study_with
 ```
 
 ### ⚙️ 사용 방법
@@ -59,7 +55,13 @@ python main.py
 
 ### 📂 프리셋 파일 구조
 
-프리셋은 프로젝트 폴더 내 **`block_list/`** 폴더에 저장됩니다.
+프리셋은 기본적으로 OS별 사용자 데이터 폴더에 저장됩니다.
+
+- Linux: `~/.local/share/study-with/presets/`
+- macOS: `~/Library/Application Support/StudyWith/presets/`
+- Windows: `%APPDATA%\\StudyWith\\presets\\`
+
+또한, 과거 버전 호환을 위해 현재 디렉토리에 `block_list/`가 이미 존재하면 그 폴더를 계속 사용합니다.
 
 **`[파일명].txt` 예시:**
 
