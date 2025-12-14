@@ -21,6 +21,9 @@ from .ui import PipUI, StudyWithUI
 from .session_manager import SessionManager
 from .rank_themes import get_theme
 
+# 클라우드 로그인/동기화
+from .cloud_client import CloudClient, CloudError
+
 # Flask 관련 (확장 프로그램 연동용)
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -349,6 +352,30 @@ class StudyWithLogic(StudyWithUI):
         _ensure_default_preset(preset_dir)
         self.preset_dir = str(preset_dir)
 
+        # ------------------------------
+        # 클라우드(로그인/프리셋/레벨) 초기화
+        # ------------------------------
+        self.cloud = CloudClient()
+        try:
+            # UI에 저장된 설정 반영
+            if hasattr(self, "cloud_server_input"):
+                self.cloud_server_input.setText(self.cloud.base_url)
+            if hasattr(self, "cloud_username_input"):
+                self.cloud_username_input.setText(self.cloud.auth.username)
+            self._update_cloud_status()
+        except Exception:
+            pass
+
+        # 버튼 연결
+        try:
+            self.cloud_login_btn.clicked.connect(self.cloud_login)
+            self.cloud_register_btn.clicked.connect(self.cloud_register)
+            self.cloud_logout_btn.clicked.connect(self.cloud_logout)
+            self.cloud_sync_btn.clicked.connect(self.cloud_sync)
+        except Exception:
+            # UI가 없는 환경에서도 앱이 뜨도록 조용히 무시
+            pass
+
         # 이전에 로딩했던 프리셋 자동 로딩
         last_preset = load_last_preset_path()
         if last_preset:
@@ -379,6 +406,8 @@ class StudyWithLogic(StudyWithUI):
             "화이팅! 지금의 노력이 당신을 더 강하게 만듭니다! 💫",
             "잘하고 있어요! 집중하는 시간이 당신의 자산입니다! 🌟"
         ]
+
+        self._cloud_task = None
 
     def play_sound(self, file_name):
         """번들된 sounds 리소스의 mp3 파일을 재생합니다."""
@@ -568,6 +597,165 @@ class StudyWithLogic(StudyWithUI):
         """로그 발생 시 처리"""
         if self.log_mode:
             self.append_log_ui(message, msg_type)
+
+    # ------------------------------
+    # 클라우드(로그인/동기화)
+    # ------------------------------
+    def _update_cloud_status(self, extra: str = "") -> None:
+        try:
+            if not hasattr(self, "cloud_status_label"):
+                return
+            if self.cloud.is_logged_in():
+                user = self.cloud.auth.username or "unknown"
+                text = f"☁️ 클라우드: 로그인됨 ({user})"
+            else:
+                text = "☁️ 클라우드: 로그인 안 됨"
+            if extra:
+                text += f" - {extra}"
+            self.cloud_status_label.setText(text)
+        except Exception:
+            pass
+
+    class _CloudTaskThread(QThread):
+        done = pyqtSignal(object)
+        failed = pyqtSignal(str)
+
+        def __init__(self, fn):
+            super().__init__()
+            self._fn = fn
+
+        def run(self):
+            try:
+                res = self._fn()
+                self.done.emit(res)
+            except Exception as e:
+                self.failed.emit(str(e))
+
+    def _start_cloud_task(self, label: str, fn, on_done=None) -> None:
+        if getattr(self, "_cloud_task", None) is not None and self._cloud_task.isRunning():
+            self.handle_log("클라우드 작업이 이미 진행 중입니다.", "WARNING")
+            return
+
+        self._update_cloud_status(label)
+        try:
+            self.cloud_sync_btn.setDisabled(True)
+            self.cloud_login_btn.setDisabled(True)
+            self.cloud_register_btn.setDisabled(True)
+            self.cloud_logout_btn.setDisabled(True)
+        except Exception:
+            pass
+
+        t = self._CloudTaskThread(fn)
+        self._cloud_task = t
+
+        def _finish_ui():
+            try:
+                self.cloud_sync_btn.setDisabled(False)
+                self.cloud_login_btn.setDisabled(False)
+                self.cloud_register_btn.setDisabled(False)
+                self.cloud_logout_btn.setDisabled(False)
+            except Exception:
+                pass
+            self._update_cloud_status()
+
+        def _ok(res):
+            _finish_ui()
+            if on_done:
+                try:
+                    on_done(res)
+                except Exception as e:
+                    self.handle_log(f"클라우드 처리 후 콜백 오류: {e}", "ERROR")
+
+        def _fail(msg):
+            _finish_ui()
+            self.handle_log(f"클라우드 오류: {msg}", "ERROR")
+            try:
+                QMessageBox.warning(self, "클라우드 오류", msg)
+            except Exception:
+                pass
+
+        t.done.connect(_ok)
+        t.failed.connect(_fail)
+        t.start()
+
+    def _cloud_apply_inputs(self) -> None:
+        base_url = ""
+        try:
+            base_url = self.cloud_server_input.text().strip()
+        except Exception:
+            pass
+        if base_url:
+            self.cloud.set_base_url(base_url)
+
+    def cloud_login(self) -> None:
+        self._cloud_apply_inputs()
+        try:
+            username = self.cloud_username_input.text().strip()
+            password = self.cloud_password_input.text()
+        except Exception:
+            username, password = "", ""
+
+        def _fn():
+            return self.cloud.login(username, password)
+
+        def _done(_res):
+            self.handle_log("☁️ 로그인 완료", "SUCCESS")
+            self._update_cloud_status()
+
+        self._start_cloud_task("로그인 중...", _fn, _done)
+
+    def cloud_register(self) -> None:
+        self._cloud_apply_inputs()
+        try:
+            username = self.cloud_username_input.text().strip()
+            password = self.cloud_password_input.text()
+        except Exception:
+            username, password = "", ""
+
+        def _fn():
+            return self.cloud.register(username, password)
+
+        def _done(_res):
+            self.handle_log("☁️ 회원가입/로그인 완료", "SUCCESS")
+            self._update_cloud_status()
+
+        self._start_cloud_task("회원가입 중...", _fn, _done)
+
+    def cloud_logout(self) -> None:
+        self.cloud.logout()
+        self._update_cloud_status("로그아웃됨")
+        self.handle_log("☁️ 로그아웃 완료", "INFO")
+
+    def cloud_sync(self) -> None:
+        self._cloud_apply_inputs()
+
+        def _fn():
+            # 1) 프리셋 동기화
+            uploaded, downloaded = self.cloud.sync_presets_dir(self.preset_dir)
+
+            # 2) 유저 레벨(통계) 업로드
+            total_score = 0
+            rank = "BRONZE"
+            try:
+                if self.session_manager is not None:
+                    stats = self.session_manager.get_statistics()
+                    total_score = int(stats.get("total_score", 0))
+                    rank = str(stats.get("rank", "BRONZE"))
+            except Exception:
+                pass
+            prof = self.cloud.upload_profile(total_score=total_score, rank=rank)
+            return {"uploaded": uploaded, "downloaded": downloaded, "profile": prof}
+
+        def _done(res):
+            up = res.get("uploaded", 0)
+            down = res.get("downloaded", 0)
+            self.handle_log(f"☁️ 동기화 완료: 업로드 {up}개 / 다운로드 {down}개", "SUCCESS")
+            try:
+                QMessageBox.information(self, "동기화 완료", f"업로드 {up}개, 다운로드 {down}개 완료")
+            except Exception:
+                pass
+
+        self._start_cloud_task("동기화 중...", _fn, _done)
 
     def toggle_session(self):
         if not self.is_running: self.start_session()
