@@ -3,11 +3,11 @@ import sys
 import os
 import time
 import psutil
-import platform
 import ctypes
 from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QFontDatabase, QFont
+from ui import StudyWithUI, PipUI
 
 # Flask 관련 (확장 프로그램 연동용)
 from flask import Flask, jsonify
@@ -146,7 +146,8 @@ class StudyWithLogic(StudyWithUI):
         self.current_cycle = 0
         self.current_sites = []
         self.current_apps = []
-        
+        self.pip_window = PipUI()
+        self.is_pip_mode = False
         self.blocker_thread = None
         
         # API 서버 즉시 시작 (확장 프로그램 통신용)
@@ -155,7 +156,6 @@ class StudyWithLogic(StudyWithUI):
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_timer)
-        self.pin_btn.clicked.connect(self.toggle_pin)
 
         # ★ UI 이벤트 연결 (버튼 클릭 등)
         self.start_btn.clicked.connect(self.toggle_session)
@@ -163,9 +163,43 @@ class StudyWithLogic(StudyWithUI):
         self.load_btn.clicked.connect(self.load_preset)
         self.log_check.stateChanged.connect(self.toggle_log_mode)
 
+        self.pip_btn.clicked.connect(self.switch_to_pip)
+        self.pip_window.return_btn.clicked.connect(self.return_from_pip)
+
         # 시작 시 block_list 폴더가 없으면 생성
         self.preset_dir = os.path.join(os.getcwd(), "block_list")
         os.makedirs(self.preset_dir, exist_ok=True)
+
+    def switch_to_pip(self):
+        """메인 창을 숨기고 PIP 창을 보여줍니다."""
+        self.is_pip_mode = True
+        self.hide() # 메인 창 숨김
+        
+        # 현재 상태를 PIP 창에 동기화하고 보여줌
+        self.sync_pip_ui()
+        # 메인창의 위치 근처에 띄우기 (선택사항)
+        self.pip_window.move(self.x() + 50, self.y() + 50)
+        self.pip_window.show() # PIP 창 표시
+        self.handle_log("📺 PIP 모드로 전환되었습니다.", "INFO")
+
+    def return_from_pip(self):
+        """PIP 창을 숨기고 메인 창을 보여줍니다."""
+        self.is_pip_mode = False
+        self.pip_window.hide() # PIP 창 숨김
+        self.show() # 메인 창 표시
+        self.handle_log("🖥️ 메인 모드로 복귀했습니다.", "INFO")
+
+    def sync_pip_ui(self):
+        """현재 상태(시간, 모드)를 PIP 창 라벨에 복사합니다."""
+        self.pip_window.timer_label.setText(self.timer_label.text())
+        self.pip_window.status_label.setText(self.status_label.text())
+        # 상태에 따라 색상 동기화
+        if self.current_state == "FOCUS":
+             self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #D08770;")
+        elif self.current_state == "BREAK":
+             self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #A3BE8C;")
+        else:
+             self.pip_window.status_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #ECEFF4;")
 
     # --- 프리셋 저장 기능 ---
     def save_preset(self):
@@ -233,26 +267,6 @@ class StudyWithLogic(StudyWithUI):
             except Exception as e:
                 QMessageBox.critical(self, "오류", f"불러오기 실패: {e}")
         
-    # --- 맨 앞 고정 기능 구현 ---
-    def toggle_pin(self):
-        # 버튼이 눌린 상태(Checked)인지 확인
-        is_on_top = self.pin_btn.isChecked()
-
-        # 현재 윈도우 플래그 가져오기
-        current_flags = self.windowFlags()
-
-        if is_on_top:
-            # [설정] 맨 위 고정 플래그 추가
-            self.setWindowFlags(current_flags | Qt.WindowType.WindowStaysOnTopHint)
-            self.handle_log("📌 오버레이 모드 ON: 창이 맨 위에 고정됩니다.", "INFO")
-        else:
-            # [해제] 맨 위 고정 플래그 제거
-            self.setWindowFlags(current_flags & ~Qt.WindowType.WindowStaysOnTopHint)
-            self.handle_log("📌 오버레이 모드 OFF: 고정이 해제되었습니다.", "INFO")
-        
-        # ★ 중요: 플래그 변경 후에는 반드시 show()를 다시 호출해야 적용됨
-        self.show()
-    
     # --- 로직 메서드 구현 ---
     
     def toggle_log_mode(self, state):
@@ -317,6 +331,10 @@ class StudyWithLogic(StudyWithUI):
         self.start_btn.setText("세션 시작")
         self.start_btn.setStyleSheet("")
         self.disable_inputs(False)
+
+        self.status_label.setStyleSheet("color: #ECEFF4;")
+        if self.is_pip_mode: self.sync_pip_ui()
+
         self.handle_log("세션이 중지되었습니다.", "WARNING")
 
     def enter_focus_mode(self):
@@ -324,6 +342,9 @@ class StudyWithLogic(StudyWithUI):
         self.time_left = self.focus_input.value() * 60
         self.status_label.setText(f"🔥 집중 중 ({self.current_cycle}/{self.total_cycles})")
         self.status_label.setStyleSheet("color: #D08770; font-weight: bold;")
+
+        if self.is_pip_mode: self.sync_pip_ui()
+
         self.enable_blocking()
         self.timer.start(1000)
         self.handle_log(f"🔥 집중 모드 시작 (Cycle {self.current_cycle})", "INFO")
@@ -333,27 +354,35 @@ class StudyWithLogic(StudyWithUI):
         self.time_left = self.break_input.value() * 60
         self.status_label.setText(f"☕ 휴식 시간 ({self.current_cycle}/{self.total_cycles})")
         self.status_label.setStyleSheet("color: #A3BE8C; font-weight: bold;")
+
+        if self.is_pip_mode: self.sync_pip_ui()
+
         self.disable_blocking()
         self.timer.start(1000)
         self.handle_log(f"☕ 휴식 모드 시작 (Cycle {self.current_cycle})", "INFO")
 
     def update_timer(self):
-        minutes = self.time_left // 60
-        seconds = self.time_left % 60
-        self.timer_label.setText(f"{minutes:02}:{seconds:02}")
+            minutes = self.time_left // 60
+            seconds = self.time_left % 60
+            time_str = f"{minutes:02}:{seconds:02}"
+            
+            # [중요] 메인 창과 PIP 창 모두 시간 업데이트
+            self.timer_label.setText(time_str)
+            if self.is_pip_mode:
+                self.pip_window.timer_label.setText(time_str)
 
-        if self.time_left > 0:
-            self.time_left -= 1
-        else:
-            self.timer.stop()
-            if self.current_state == "FOCUS":
-                if self.current_cycle >= self.total_cycles:
-                    self.finish_all_sessions()
-                else:
-                    self.enter_break_mode()
-            elif self.current_state == "BREAK":
-                self.current_cycle += 1
-                self.enter_focus_mode()
+            if self.time_left > 0:
+                self.time_left -= 1
+            else:
+                self.timer.stop()
+                if self.current_state == "FOCUS":
+                    if self.current_cycle >= self.total_cycles:
+                        self.finish_all_sessions()
+                    else:
+                        self.enter_break_mode()
+                elif self.current_state == "BREAK":
+                    self.current_cycle += 1
+                    self.enter_focus_mode()
 
     def finish_all_sessions(self):
         self.handle_log("모든 세션 완료!", "SUCCESS")
