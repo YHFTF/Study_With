@@ -4,7 +4,10 @@ import os
 import time
 import psutil
 import ctypes
-from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog
+import platform
+import subprocess
+import shutil
+from PyQt6.QtWidgets import QApplication, QMessageBox, QFileDialog, QSystemTrayIcon, QStyle
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QFontDatabase, QFont
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -73,6 +76,7 @@ class ApiServerThread(QThread):
 
 class BlockerWorker(QThread):
     log_signal = pyqtSignal(str, str) 
+    blocked_signal = pyqtSignal(str, str)  # (process_name, matched_keyword)
 
     def __init__(self, block_keywords):
         super().__init__()
@@ -117,6 +121,7 @@ class BlockerWorker(QThread):
                             if keyword in proc_name_lower:
                                 proc.kill() # 강제 종료
                                 self.log_signal.emit(f"🚫 프로그램 차단됨: {proc_name} ('{keyword}' 포함)", "SUCCESS")
+                                self.blocked_signal.emit(proc_name, keyword)
                                 break # 한 번 죽였으면 다음 프로세스로 넘어감
 
                     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -152,6 +157,12 @@ class StudyWithLogic(StudyWithUI):
         self.pip_window = PipUI()
         self.is_pip_mode = False
         self.blocker_thread = None
+
+        # 차단 알림(트레이) 설정
+        self._tray = None
+        self._last_notify_at = {}  # key -> timestamp
+        self._notify_box = None
+        self._init_tray_icon()
         
         # API 서버 즉시 시작 (확장 프로그램 통신용)
         self.api_server = ApiServerThread()
@@ -313,8 +324,70 @@ class StudyWithLogic(StudyWithUI):
         if self.blocker_thread is None or not self.blocker_thread.isRunning():
             self.blocker_thread = BlockerWorker(self.current_apps)
             self.blocker_thread.log_signal.connect(self.handle_log)
+            self.blocker_thread.blocked_signal.connect(self.on_process_blocked)
             self.blocker_thread.start()
         self.handle_log("🛡️ 차단 기능이 활성화되었습니다.", "INFO")
+
+    def _init_tray_icon(self):
+        """시스템 트레이 알림을 초기화합니다(가능한 환경에서만)."""
+        try:
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                return
+            self._tray = QSystemTrayIcon(self)
+            icon = QApplication.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning)
+            self._tray.setIcon(icon)
+            self._tray.setToolTip("Study With")
+            self._tray.show()
+        except Exception:
+            self._tray = None
+
+    def _notify(self, title: str, message: str):
+        """차단 알림을 표시합니다(트레이 우선, Linux는 notify-send 폴백)."""
+        try:
+            if self._tray and self._tray.isVisible():
+                self._tray.showMessage(title, message)
+                return
+        except Exception:
+            pass
+
+        try:
+            if platform.system().lower() == "linux" and shutil.which("notify-send"):
+                subprocess.Popen(["notify-send", title, message])
+                return
+        except Exception:
+            pass
+
+        # 최후 폴백: 앱 내부 비모달 알림창(자동 닫힘)
+        try:
+            if self._notify_box is not None:
+                self._notify_box.close()
+        except Exception:
+            pass
+
+        try:
+            box = QMessageBox(self)
+            box.setWindowTitle(title)
+            box.setText(message)
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setStandardButtons(QMessageBox.StandardButton.NoButton)
+            box.setWindowFlag(Qt.WindowType.Tool, True)
+            box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            box.show()
+            QTimer.singleShot(2000, box.close)
+            self._notify_box = box
+        except Exception:
+            pass
+
+    def on_process_blocked(self, proc_name: str, keyword: str):
+        """프로세스가 차단(종료)됐을 때 알림창을 띄웁니다."""
+        now = time.time()
+        key = f"{proc_name.lower()}::{keyword.lower()}"
+        last = self._last_notify_at.get(key, 0)
+        if now - last < 3:
+            return
+        self._last_notify_at[key] = now
+
+        self._notify("Study With - 프로그램 차단", f"{proc_name} (키워드: {keyword})")
 
     def disable_blocking(self):
         """차단 기능을 비활성화합니다."""
