@@ -63,3 +63,4 @@ pyinstaller --name=StudyWith ^
 ### Flask 서버 문제
 - 백그라운드 스레드가 exe에서도 정상 작동하는지 확인
 - 포트 충돌이 없는지 확인
+

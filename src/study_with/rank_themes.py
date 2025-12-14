@@ -197,6 +197,54 @@ def get_default_style() -> str:
             background-color: rgba(76, 86, 106, 250);
         }}
         
+        /* QSpinBox 위아래 버튼 스타일 */
+        QSpinBox::up-button, QSpinBox::down-button {{
+            background-color: rgba(94, 129, 172, 200);
+            border: none;
+            border-radius: 3px;
+            width: 20px;
+            min-width: 20px;
+            max-width: 20px;
+        }}
+        
+        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+            background-color: rgba(129, 161, 193, 250);
+        }}
+        
+        QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {{
+            background-color: rgba(76, 86, 106, 250);
+        }}
+        
+        QSpinBox::up-arrow {{
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-bottom: 5px solid #ECEFF4;
+            width: 0px;
+            height: 0px;
+            margin-left: 2px;
+            margin-right: 2px;
+        }}
+        
+        QSpinBox::up-arrow:hover {{
+            border-bottom: 5px solid #88C0D0;
+        }}
+        
+        QSpinBox::down-arrow {{
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid #ECEFF4;
+            width: 0px;
+            height: 0px;
+            margin-left: 2px;
+            margin-right: 2px;
+        }}
+        
+        QSpinBox::down-arrow:hover {{
+            border-top: 5px solid #88C0D0;
+        }}
+        
         QCheckBox {{ 
             color: #ECEFF4; 
             spacing: 5px; 
@@ -297,6 +345,54 @@ def get_main_window_style(rank: str) -> str:
         QLineEdit:focus, QSpinBox:focus {{
             border: 2px solid {theme['accent_color']};
             background-color: rgba(76, 86, 106, 250);
+        }}
+        
+        /* QSpinBox 위아래 버튼 스타일 (티어별 색상 적용) */
+        QSpinBox::up-button, QSpinBox::down-button {{
+            background-color: rgba(94, 129, 172, 200);
+            border: none;
+            border-radius: 3px;
+            width: 20px;
+            min-width: 20px;
+            max-width: 20px;
+        }}
+        
+        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+            background-color: {theme['accent_color']};
+        }}
+        
+        QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {{
+            background-color: {theme['border_color']};
+        }}
+        
+        QSpinBox::up-arrow {{
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-bottom: 5px solid #ECEFF4;
+            width: 0px;
+            height: 0px;
+            margin-left: 2px;
+            margin-right: 2px;
+        }}
+        
+        QSpinBox::up-arrow:hover {{
+            border-bottom: 5px solid {theme['accent_color']};
+        }}
+        
+        QSpinBox::down-arrow {{
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid #ECEFF4;
+            width: 0px;
+            height: 0px;
+            margin-left: 2px;
+            margin-right: 2px;
+        }}
+        
+        QSpinBox::down-arrow:hover {{
+            border-top: 5px solid {theme['accent_color']};
         }}
         
         QCheckBox {{ 

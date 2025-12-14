@@ -61,3 +61,4 @@ exe = EXE(
     entitlements_file=None,
     icon=None,  # 아이콘 파일이 있다면 여기에 경로 지정
 )
+

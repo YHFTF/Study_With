@@ -10,6 +10,7 @@ from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QFont, QMouseEvent, QPixmap, QImage, QPainter, QPen, QBrush, QColor
 from datetime import datetime
 from .rank_themes import get_main_window_style, get_pip_style, get_theme, get_default_style, get_default_pip_style, RANK_THEMES
+from .web_effects import add_sparkle_effect, hex_to_qcolor
 
 def _resources_dir() -> Path:
     """리소스 디렉토리 반환"""
@@ -311,6 +312,7 @@ class StatsWindow(QMainWindow):
         self.log_handler = log_handler  # 로그 핸들러 콜백
         self.setWindowTitle("통계 및 등급")
         self.setGeometry(150, 150, 600, 700)  # 너비 증가로 좌우 스크롤바 방지
+        self.simple_mode = False  # 심플 모드 상태 초기화
         
         # 실제 등급을 먼저 가져와서 설정
         try:
@@ -632,6 +634,44 @@ class StatsWindow(QMainWindow):
         )
         self.score_label.setText(f"{stats['total_score']:,}점")
         self.score_label.setStyleSheet(f"font-size: 20px; color: #ECEFF4; margin-left: 10px;")
+        
+        # 티어별 반짝이는 효과 적용 (심플 모드가 아닐 때만)
+        try:
+            # 기존 효과 제거
+            if hasattr(self, '_rank_sparkle'):
+                self._rank_sparkle.stop()
+            if hasattr(self, '_rank_label_sparkle'):
+                self._rank_label_sparkle.stop()
+            
+            # 심플 모드가 아닐 때만 반짝이는 효과 적용
+            if not self.simple_mode:
+                # 티어 색상으로 QColor 생성 (더 밝게)
+                sparkle_color = hex_to_qcolor(theme['accent_color'], alpha=255)
+                
+                # 티어 이미지에 반짝이는 효과 (더 강한 효과)
+                self._rank_sparkle = add_sparkle_effect(
+                    self.rank_image_label,
+                    sparkle_color,
+                    min_blur=20,
+                    max_blur=50,
+                    duration=1200,
+                    auto_start=True
+                )
+                
+                # 티어 라벨에 반짝이는 효과 (더 약한 효과)
+                label_color = hex_to_qcolor(theme['accent_color'], alpha=200)
+                self._rank_label_sparkle = add_sparkle_effect(
+                    self.rank_label,
+                    label_color,
+                    min_blur=10,
+                    max_blur=30,
+                    duration=1500,
+                    auto_start=True
+                )
+        except Exception as sparkle_error:
+            # 반짝이는 효과 실패해도 계속 진행
+            if hasattr(self, 'log'):
+                self.log(f"반짝이는 효과 적용 오류: {sparkle_error}", "WARNING")
         
         # 다음 등급까지 남은 점수 계산 및 진행 바 업데이트
         current_score = stats['total_score']
