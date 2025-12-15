@@ -5,8 +5,8 @@ from pathlib import Path
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QLabel, 
                              QPushButton, QLineEdit, QSpinBox, QFormLayout, 
                              QFrame, QCheckBox, QTextEdit, QMessageBox, QHBoxLayout,
-                             QScrollArea, QGridLayout)
-from PyQt6.QtCore import Qt, QPoint
+                             QScrollArea, QGridLayout, QProgressBar, QGraphicsOpacityEffect)
+from PyQt6.QtCore import Qt, QPoint, QTimer, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QMouseEvent, QPixmap, QImage, QPainter, QPen, QBrush, QColor
 from datetime import datetime
 from .rank_themes import get_main_window_style, get_pip_style, get_theme, get_default_style, get_default_pip_style, RANK_THEMES
@@ -306,13 +306,15 @@ class RankProgressBar(QWidget):
 # 통계 창
 # ========================================================
 class StatsWindow(QMainWindow):
-    def __init__(self, session_manager, log_handler=None):
+    def __init__(self, session_manager, progression=None, log_handler=None):
         super().__init__()
         self.session_manager = session_manager
+        self.progression = progression
         self.log_handler = log_handler  # 로그 핸들러 콜백
         self.setWindowTitle("통계 및 등급")
         self.setGeometry(150, 150, 600, 700)  # 너비 증가로 좌우 스크롤바 방지
         self.simple_mode = False  # 심플 모드 상태 초기화
+        self._rank_sparkles = []
         
         # 실제 등급을 먼저 가져와서 설정
         try:
@@ -448,9 +450,14 @@ class StatsWindow(QMainWindow):
         self.score_label = QLabel("0점")
         self.score_label.setStyleSheet("font-size: 20px; color: #ECEFF4; margin-left: 10px;")
         self.score_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.stage_label = QLabel("스테이지 1")
+        self.stage_label.setStyleSheet("font-size: 18px; color: #A3BE8C; margin-left: 10px;")
+        self.stage_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         rank_info_layout.addWidget(self.rank_label)
         rank_info_layout.addWidget(self.score_label)
+        rank_info_layout.addWidget(self.stage_label)
         rank_layout.addLayout(rank_info_layout)
         
         # 등급 진행 바
@@ -634,12 +641,27 @@ class StatsWindow(QMainWindow):
         )
         self.score_label.setText(f"{stats['total_score']:,}점")
         self.score_label.setStyleSheet(f"font-size: 20px; color: #ECEFF4; margin-left: 10px;")
+
+        # 스테이지 표시 (progression 있으면 사용)
+        stage_text = "스테이지 정보 없음"
+        try:
+            if self.progression:
+                snap = self.progression.snapshot()
+                stage_text = f"스테이지 {snap.get('stage', 1)}"
+        except Exception as e:
+            self.log(f"스테이지 표시 오류: {e}", "WARNING")
+        self.stage_label.setText(stage_text)
         
         # 티어별 반짝이는 효과 적용 (심플 모드가 아닐 때만)
         try:
             # 기존 효과 제거
-            if hasattr(self, '_rank_sparkle'):
-                self._rank_sparkle.stop()
+            if hasattr(self, '_rank_sparkles') and self._rank_sparkles:
+                for eff in self._rank_sparkles:
+                    try:
+                        eff.stop()
+                    except Exception:
+                        pass
+            self._rank_sparkles = []
             if hasattr(self, '_rank_label_sparkle'):
                 self._rank_label_sparkle.stop()
             
@@ -647,25 +669,42 @@ class StatsWindow(QMainWindow):
             if not self.simple_mode:
                 # 티어 색상으로 QColor 생성 (더 밝게)
                 sparkle_color = hex_to_qcolor(theme['accent_color'], alpha=255)
+
+                # 스테이지에 따라 애니메이션 강도 조절 (색상은 티어 유지)
+                stage_level = 1
+                try:
+                    if self.progression:
+                        stage_level = int(self.progression.snapshot().get("stage", 1))
+                except Exception:
+                    stage_level = 1
+                stage_level = max(1, min(stage_level, 50))
+                # 강도 계산
+                img_min = 15 + stage_level // 2
+                img_max = 30 + stage_level
+                img_duration = max(900, 1600 - stage_level * 12)
+                lbl_min = 8 + stage_level // 3
+                lbl_max = 18 + stage_level // 1
+                lbl_duration = max(1000, 1800 - stage_level * 10)
                 
-                # 티어 이미지에 반짝이는 효과 (더 강한 효과)
-                self._rank_sparkle = add_sparkle_effect(
+                # 티어 이미지에 한 개의 스파클 효과 적용 (원래 로직으로 회귀)
+                eff = add_sparkle_effect(
                     self.rank_image_label,
                     sparkle_color,
-                    min_blur=20,
-                    max_blur=50,
-                    duration=1200,
+                    min_blur=img_min,
+                    max_blur=img_max,
+                    duration=img_duration,
                     auto_start=True
                 )
+                self._rank_sparkles.append(eff)
                 
                 # 티어 라벨에 반짝이는 효과 (더 약한 효과)
                 label_color = hex_to_qcolor(theme['accent_color'], alpha=200)
                 self._rank_label_sparkle = add_sparkle_effect(
                     self.rank_label,
                     label_color,
-                    min_blur=10,
-                    max_blur=30,
-                    duration=1500,
+                    min_blur=lbl_min,
+                    max_blur=lbl_max,
+                    duration=lbl_duration,
                     auto_start=True
                 )
         except Exception as sparkle_error:
@@ -732,6 +771,268 @@ class StatsWindow(QMainWindow):
         else:
             self.recent_sessions_label.setText("아직 세션 기록이 없습니다.")
 
+
+# ========================================================
+# 진행도/전투/상점 전용 창
+# ========================================================
+class BattleShopWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("전투 & 상점")
+        self.setGeometry(180, 180, 520, 620)
+        self.init_ui()
+
+    def init_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout()
+        layout.setSpacing(8)
+        central.setLayout(layout)
+
+        title = QLabel("🎮 진행도 / 상점 / 전투")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #88C0D0;")
+        layout.addWidget(title)
+
+        # 상태 라벨
+        self.points_label = QLabel("포인트: 0p")
+        self.scrolls_label = QLabel("강화 스크롤: 0장")
+        self.stage_label = QLabel("스테이지: 1")
+        self.power_label = QLabel("총 전투력: 0")
+        self.next_req_label = QLabel("다음 스테이지 요구: 0")
+        for lbl in [self.points_label, self.scrolls_label, self.stage_label, self.power_label, self.next_req_label]:
+            lbl.setStyleSheet("color: #D8DEE9; font-size: 13px;")
+            layout.addWidget(lbl)
+
+        # 스크롤 구매
+        buy_layout = QHBoxLayout()
+        self.scroll_qty_input = QSpinBox()
+        self.scroll_qty_input.setRange(1, 50)
+        self.scroll_qty_input.setValue(1)
+        self.scroll_qty_input.setSuffix(" 장")
+        self.buy_scroll_btn = QPushButton("스크롤 구매 (40p)")
+        self.buy_scroll_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        buy_layout.addWidget(self.scroll_qty_input)
+        buy_layout.addWidget(self.buy_scroll_btn)
+        layout.addLayout(buy_layout)
+
+        # 강화 버튼
+        enhance_layout = QGridLayout()
+        enhance_layout.setSpacing(8)
+        self.enhance_book_btn = QPushButton("책 강화")
+        self.enhance_pencil_btn = QPushButton("연필 강화")
+        self.enhance_laptop_btn = QPushButton("노트북 강화")
+        for btn in [self.enhance_book_btn, self.enhance_pencil_btn, self.enhance_laptop_btn]:
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # 장비 레이블 (강화 단계 표시)
+        self.book_label = QLabel("책 +0")
+        self.pencil_label = QLabel("연필 +0")
+        self.laptop_label = QLabel("노트북 +0")
+        for lbl in [self.book_label, self.pencil_label, self.laptop_label]:
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setFixedHeight(46)
+            lbl.setStyleSheet("background-color: #3B4252; color: #ECEFF4; border: 1px solid #4C566A; border-radius: 6px;")
+
+        enhance_layout.addWidget(self.book_label, 0, 0)
+        enhance_layout.addWidget(self.pencil_label, 0, 1)
+        enhance_layout.addWidget(self.laptop_label, 0, 2)
+        enhance_layout.addWidget(self.enhance_book_btn, 1, 0)
+        enhance_layout.addWidget(self.enhance_pencil_btn, 1, 1)
+        enhance_layout.addWidget(self.enhance_laptop_btn, 1, 2)
+        layout.addLayout(enhance_layout)
+
+        # 전투 영역
+        battle_header = QLabel("⚔️ 스테이지 전투 (10타 수동 입력)")
+        battle_header.setStyleSheet("font-weight: bold; color: #EBCB8B;")
+        layout.addWidget(battle_header)
+
+        self.damage_label = QLabel("")
+        self.damage_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.damage_label.setStyleSheet("font-size: 28px; font-weight: bold; color: #BF616A;")
+        layout.addWidget(self.damage_label)
+
+        self.hp_bar = QProgressBar()
+        self.hp_bar.setTextVisible(False)
+        self.hp_bar.setFixedHeight(16)
+        self.hp_bar.setRange(0, 100)
+        self.hp_bar.setValue(100)
+        self.hp_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #3B4252;
+                border: 1px solid #4C566A;
+                border-radius: 6px;
+            }
+            QProgressBar::chunk {
+                background-color: #A3BE8C;
+                border-radius: 5px;
+            }
+        """)
+        layout.addWidget(self.hp_bar)
+
+        self.remaining_hp_label = QLabel("남은 HP: 준비 중")
+        self.remaining_hp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.remaining_hp_label.setStyleSheet("color: #ECEFF4; font-size: 12px;")
+        layout.addWidget(self.remaining_hp_label)
+
+        self.stage_attack_btn = QPushButton("한 번 타격")
+        self.stage_attack_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(self.stage_attack_btn)
+
+        # 테스트 모드: 포인트 지급
+        test_layout = QHBoxLayout()
+        self.test_points_input = QSpinBox()
+        self.test_points_input.setRange(1, 100000)
+        self.test_points_input.setValue(100)
+        self.test_points_input.setSuffix(" p")
+        self.add_points_btn = QPushButton("포인트 지급")
+        self.add_points_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_points_btn.setEnabled(False)
+        test_layout.addWidget(self.test_points_input)
+        test_layout.addWidget(self.add_points_btn)
+        layout.addLayout(test_layout)
+
+        self.battle_log = QTextEdit()
+        self.battle_log.setReadOnly(True)
+        self.battle_log.setStyleSheet("background-color: #242933; color: #ECEFF4; border: 1px solid #4C566A; border-radius: 5px;")
+        self.battle_log.setMaximumHeight(200)
+        layout.addWidget(self.battle_log)
+
+        layout.addStretch()
+        self._sparkles = {}
+
+        # 전체 오버레이 이펙트
+        self.overlay = QLabel(self)
+        self.overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.overlay.setStyleSheet("background: rgba(0,0,0,0.6); color: white; font-size: 32px; font-weight: bold;")
+        self.overlay.hide()
+        self.overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.overlay_effect = QGraphicsOpacityEffect(self.overlay)
+        self.overlay.setGraphicsEffect(self.overlay_effect)
+        self.overlay_anim = QPropertyAnimation(self.overlay_effect, b"opacity", self)
+        self.overlay_anim.setDuration(1400)  # 살짝 더 길게 표시
+        self.overlay_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+
+    def update_state(self, snap: dict):
+        self.points_label.setText(f"포인트: {snap.get('points', 0)}p")
+        self.scrolls_label.setText(f"강화 스크롤: {snap.get('scrolls', 0)}장")
+        self.stage_label.setText(f"스테이지: {snap.get('stage', 1)}")
+        self.power_label.setText(f"총 전투력: {snap.get('total_power', 0)}")
+        self.next_req_label.setText(f"다음 스테이지 요구: {snap.get('next_stage_requirement', 0)}")
+
+    def set_remaining_hp(self, remaining: float, hp: float, hits_used: int, limit: int):
+        try:
+            if hp <= 0:
+                self.hp_bar.setRange(0, 1)
+                self.hp_bar.setValue(0)
+            else:
+                scale = 10
+                self.hp_bar.setRange(0, int(hp * scale))
+                self.hp_bar.setValue(max(0, int(remaining * scale)))
+            self.remaining_hp_label.setText(f"남은 HP: {max(0, round(remaining,1))} / {hp} (타격 {hits_used}/{limit})")
+        except Exception:
+            self.remaining_hp_label.setText("남은 HP: -")
+
+    def show_damage(self, dmg: float, remaining: float, finished: bool, success: bool):
+        color = "#A3BE8C" if success else "#EBCB8B"
+        self.damage_label.setText(f"-{dmg}")
+        self.damage_label.setStyleSheet(f"font-size: 28px; font-weight: bold; color: {color};")
+        self.remaining_hp_label.setText(f"남은 HP: {max(0, round(remaining, 1))}")
+        # 잠깐 표시 후 흐려짐
+        QTimer.singleShot(700, lambda: self.damage_label.setText("" if finished else self.damage_label.text()))
+
+    def append_battle_log(self, text: str):
+        self.battle_log.append(text)
+        scrollbar = self.battle_log.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def append_battle_log_colored(self, text: str, color: str):
+        self.battle_log.append(f"<span style='color:{color}'>{text}</span>")
+        scrollbar = self.battle_log.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def clear_battle_log(self):
+        self.battle_log.clear()
+
+    def set_test_mode(self, enabled: bool):
+        self.add_points_btn.setEnabled(enabled)
+        self.test_points_input.setEnabled(enabled)
+        self.add_points_btn.setVisible(enabled)
+        self.test_points_input.setVisible(enabled)
+
+    def play_enhance_effect(self, kind: str):
+        """
+        kind: success | fail | down
+        """
+        colors = {
+            "success": ("#16A34A", "✨ 강화 성공!"),
+            "fail": ("#EF4444", "❌ 실패"),
+            "down": ("#F59E0B", "⚠️ 하락"),
+        }
+        color, text = colors.get(kind, ("#81A1C1", ""))
+        self.overlay.setText(text)
+        self.overlay.setStyleSheet(
+            f"background: rgba(0,0,0,0.5); color: {color}; font-size: 32px; font-weight: bold;"
+        )
+        self.overlay.raise_()
+        self.overlay.setGeometry(self.rect())
+        self.overlay.show()
+        self.overlay_effect.setOpacity(0.0)
+        self.overlay_anim.stop()
+        self.overlay_anim.setStartValue(1.0)
+        self.overlay_anim.setEndValue(0.0)
+        self.overlay_anim.finished.connect(self.overlay.hide)
+        self.overlay_anim.start()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "overlay"):
+            self.overlay.setGeometry(self.rect())
+
+    def update_equipment(self, snap: dict):
+        inv = snap.get("inventory", {})
+        mapping = [
+            ("book", self.book_label, "책"),
+            ("pencil", self.pencil_label, "연필"),
+            ("laptop", self.laptop_label, "노트북"),
+        ]
+        for slot, lbl, name in mapping:
+            data = inv.get(slot, {})
+            level = data.get("level", 0)
+            power = data.get("power", 0)
+            lbl.setText(f"{name} +{level} (PWR {power})")
+            color = "#81A1C1"
+            if level >= 8:
+                color = "#F472B6"
+            elif level >= 5:
+                color = "#FBBF24"
+            elif level >= 2:
+                color = "#A3BE8C"
+            lbl.setStyleSheet(
+                f"background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #3B4252, stop:1 #2E3440);"
+                f"color: #ECEFF4; border: 2px solid {color}; border-radius: 8px; padding: 4px;"
+                f"font-weight: bold;"
+            )
+            # 반짝이 효과 강도 레벨별
+            if slot in self._sparkles and self._sparkles[slot]:
+                try:
+                    self._sparkles[slot].stop()
+                except Exception:
+                    pass
+            sparkle_color = hex_to_qcolor(color, alpha=200)
+            blur_min = 10 + level * 2
+            blur_max = 25 + level * 3
+            duration = max(800, 1500 - level * 50)
+            try:
+                self._sparkles[slot] = add_sparkle_effect(
+                    lbl,
+                    sparkle_color,
+                    min_blur=blur_min,
+                    max_blur=blur_max,
+                    duration=duration,
+                    auto_start=True,
+                )
+            except Exception:
+                self._sparkles[slot] = None
 # ========================================================
 # 메인 UI 클래스
 # ========================================================
@@ -871,6 +1172,12 @@ class StudyWithUI(QMainWindow):
         self.stats_btn.setStyleSheet("background-color: #5E81AC; color: white; padding: 10px; font-weight: bold;")
         layout.addWidget(self.stats_btn)
 
+        # 진행도/전투/상점 전용 창 열기
+        self.open_battle_shop_btn = QPushButton("🎮 전투·상점 창 열기")
+        self.open_battle_shop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.open_battle_shop_btn.setStyleSheet("background-color: #4C566A; color: white; padding: 10px; font-weight: bold;")
+        layout.addWidget(self.open_battle_shop_btn)
+
         layout.addStretch()
 
         # 5. 심플 모드 및 로그
@@ -881,6 +1188,10 @@ class StudyWithUI(QMainWindow):
         self.log_check = QCheckBox("🛠️ 로그 모드 활성화")
         self.log_check.setStyleSheet("color: #D8DEE9; margin-top: 10px;")
         layout.addWidget(self.log_check)
+
+        self.test_mode_check = QCheckBox("🧪 테스트 모드 (포인트 임의 지급)")
+        self.test_mode_check.setStyleSheet("color: #EBCB8B; margin-top: 4px;")
+        layout.addWidget(self.test_mode_check)
 
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)

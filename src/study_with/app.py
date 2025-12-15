@@ -17,9 +17,10 @@ from PyQt6.QtGui import QFont, QFontDatabase
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from .ui import PipUI, StudyWithUI
+from .ui import BattleShopWindow, PipUI, StudyWithUI
 from .session_manager import SessionManager
 from .rank_themes import get_theme
+from .progression_manager import ProgressionManager
 
 # Flask 관련 (확장 프로그램 연동용)
 from flask import Flask, jsonify
@@ -263,6 +264,8 @@ class BlockerWorker(QThread):
 # ---------------------------------------------------------
 # [메인 로직] UI와 기능을 연결하는 컨트롤러
 # ---------------------------------------------------------
+TEST_MODE_ENABLED = False
+
 class StudyWithLogic(StudyWithUI):
     def __init__(self):
         super().__init__() # UI 초기화 (ui.py의 init_ui 실행됨)
@@ -286,6 +289,17 @@ class StudyWithLogic(StudyWithUI):
             traceback.print_exc()
             # 기본값으로 계속 진행
             self.session_manager = None
+        
+        # 진행도/장비/포인트 매니저
+        try:
+            self.progression = ProgressionManager()
+        except Exception as e:
+            print(f"진행도 매니저 초기화 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            self.progression = None
+        self.battle_shop_window = None
+        self.test_mode = TEST_MODE_ENABLED
         
         # PIP 창 초기화 (세션 매니저 이후)
         try:
@@ -316,17 +330,23 @@ class StudyWithLogic(StudyWithUI):
         self.load_btn.clicked.connect(lambda: self.load_preset())  # 명시적으로 파라미터 없이 호출
         self.log_check.stateChanged.connect(self.toggle_log_mode)
         self.simple_mode_check.stateChanged.connect(self.toggle_simple_mode)  # 심플 모드 체크박스 연결
+        # 테스트 모드는 코드 플래그로만 제어 (UI 토글 비활성)
+        self.test_mode_check.setChecked(TEST_MODE_ENABLED)
+        self.test_mode_check.setVisible(False)
 
         self.pip_btn.clicked.connect(self.switch_to_pip)
         if self.pip_window is not None:
             self.pip_window.return_btn.clicked.connect(self.return_from_pip)
+
+        # 진행도/상점/전투 창 열기
+        self.open_battle_shop_btn.clicked.connect(self.open_battle_shop)
         
         # 통계 창 초기화
         try:
             if self.session_manager is not None:
                 from .ui import StatsWindow
                 # 로그 핸들러를 전달하여 통계 창에서도 로그가 표시되도록 함
-                self.stats_window = StatsWindow(self.session_manager, log_handler=self.handle_log)
+                self.stats_window = StatsWindow(self.session_manager, progression=self.progression, log_handler=self.handle_log)
                 self.stats_btn.clicked.connect(self.show_stats)
             else:
                 self.stats_window = None
@@ -379,6 +399,9 @@ class StudyWithLogic(StudyWithUI):
             "화이팅! 지금의 노력이 당신을 더 강하게 만듭니다! 💫",
             "잘하고 있어요! 집중하는 시간이 당신의 자산입니다! 🌟"
         ]
+
+        # 진행도 초기 UI 동기화
+        self.refresh_progression_ui()
 
     def play_sound(self, file_name):
         """번들된 sounds 리소스의 mp3 파일을 재생합니다."""
@@ -569,6 +592,217 @@ class StudyWithLogic(StudyWithUI):
         if self.log_mode:
             self.append_log_ui(message, msg_type)
 
+    def toggle_test_mode(self, state):
+        # 더 이상 UI로 제어하지 않음
+        pass
+
+    def open_battle_shop(self):
+        """전투/상점 창 열기"""
+        if self.progression is None:
+            QMessageBox.warning(self, "오류", "진행도 매니저를 초기화할 수 없습니다.")
+            return
+        if self.battle_shop_window is None:
+            self.battle_shop_window = BattleShopWindow()
+            self.battle_shop_window.buy_scroll_btn.clicked.connect(self.buy_scrolls)
+            self.battle_shop_window.enhance_book_btn.clicked.connect(lambda: self.enhance_item("book", "책"))
+            self.battle_shop_window.enhance_pencil_btn.clicked.connect(lambda: self.enhance_item("pencil", "연필"))
+            self.battle_shop_window.enhance_laptop_btn.clicked.connect(lambda: self.enhance_item("laptop", "노트북"))
+            self.battle_shop_window.stage_attack_btn.clicked.connect(self.stage_attack)
+            self.battle_shop_window.add_points_btn.clicked.connect(self.add_test_points)
+        self.refresh_progression_ui()
+        self.battle_shop_window.set_test_mode(self.test_mode)
+        self.battle_shop_window.show()
+        self.battle_shop_window.raise_()
+        self.battle_shop_window.activateWindow()
+
+    def refresh_progression_ui(self):
+        """포인트/장비/스테이지 상태를 전용 창에 반영"""
+        if self.progression is None or self.battle_shop_window is None:
+            return
+        try:
+            snap = self.progression.snapshot()
+            self.battle_shop_window.update_state(snap)
+            self.battle_shop_window.update_equipment(snap)
+            battle = self.progression.get_battle_status()
+            # 강화 확률 툴팁 갱신
+            try:
+                rates_book = self.progression.get_enhance_rates("book")
+                rates_pencil = self.progression.get_enhance_rates("pencil")
+                rates_laptop = self.progression.get_enhance_rates("laptop")
+                self.battle_shop_window.enhance_book_btn.setToolTip(f"성공률 {rates_book['success']}% / 하락률 {rates_book['downgrade']}%")
+                self.battle_shop_window.enhance_pencil_btn.setToolTip(f"성공률 {rates_pencil['success']}% / 하락률 {rates_pencil['downgrade']}%")
+                self.battle_shop_window.enhance_laptop_btn.setToolTip(f"성공률 {rates_laptop['success']}% / 하락률 {rates_laptop['downgrade']}%")
+            except Exception:
+                pass
+            if battle.get("remaining_hp") is None:
+                self.battle_shop_window.set_remaining_hp(battle["hp"], battle["hp"], 0, battle.get("limit", 10))
+            else:
+                self.battle_shop_window.set_remaining_hp(battle["remaining_hp"], battle["hp"], battle["hits_used"], battle["limit"])
+        except Exception as e:
+            print(f"진행도 UI 갱신 오류: {e}")
+
+    def buy_scrolls(self):
+        """포인트로 강화 스크롤 구매"""
+        if self.progression is None:
+            QMessageBox.warning(self, "오류", "진행도 매니저를 초기화할 수 없습니다.")
+            return
+        qty = 1
+        if self.battle_shop_window is not None:
+            qty = self.battle_shop_window.scroll_qty_input.value()
+        success = self.progression.buy_scroll(qty)
+        if success:
+            snap = self.progression.snapshot()
+            self.handle_log(f"🛒 스크롤 {qty}장 구매 (잔여 포인트 {snap['points']}p, 보유 스크롤 {snap['scrolls']}장)", "SUCCESS")
+        else:
+            self.handle_log("포인트가 부족하거나 수량이 올바르지 않습니다.", "WARNING")
+            QMessageBox.warning(self, "구매 실패", "포인트가 부족하거나 수량이 잘못되었습니다.")
+        self.refresh_progression_ui()
+
+    def add_test_points(self):
+        """테스트 모드에서 포인트를 임의로 지급"""
+        if not self.test_mode:
+            QMessageBox.warning(self, "테스트 모드 아님", "테스트 모드를 먼저 켜주세요.")
+            return
+        if self.progression is None:
+            QMessageBox.warning(self, "오류", "진행도 매니저를 초기화할 수 없습니다.")
+            return
+        amount = 0
+        if self.battle_shop_window is not None:
+            amount = self.battle_shop_window.test_points_input.value()
+        if amount <= 0:
+            QMessageBox.warning(self, "지급 실패", "0보다 큰 값을 입력하세요.")
+            return
+        if self.progression.add_points(amount):
+            snap = self.progression.snapshot()
+            self.handle_log(f"🧪 테스트 포인트 지급: +{amount}p (보유 {snap['points']}p)", "WARNING")
+        else:
+            QMessageBox.warning(self, "지급 실패", "포인트 지급에 실패했습니다.")
+        self.refresh_progression_ui()
+
+    def enhance_item(self, slot: str, label: str):
+        """장비 강화 시도"""
+        if self.progression is None:
+            QMessageBox.warning(self, "오류", "진행도 매니저를 초기화할 수 없습니다.")
+            return
+        res = self.progression.enhance(slot)
+        if res is None:
+            self.handle_log("스크롤이 부족하거나 장비를 찾을 수 없습니다.", "WARNING")
+            QMessageBox.warning(self, "강화 실패", "스크롤이 부족합니다.")
+            return
+        effect_kind = "success" if res.success else ("down" if res.downgraded else "fail")
+        sound_file = "success.mp3" if res.success else ("down.mp3" if res.downgraded else "fail.mp3")
+        if res.success:
+            msg = f"{label} 강화 성공! {res.before_level} → {res.after_level} (성공률 {res.success_rate}%)"
+            self.handle_log(msg, "SUCCESS")
+        else:
+            if res.downgraded:
+                msg = f"{label} 강화 실패 → 하락! {res.before_level} → {res.after_level} (성공률 {res.success_rate}%)"
+                self.handle_log(msg, "WARNING")
+            else:
+                msg = f"{label} 강화 실패 (성공률 {res.success_rate}%)"
+                self.handle_log(msg, "WARNING")
+
+        # 사운드 & 오버레이 이펙트
+        try:
+            self.play_sound(sound_file)
+        except Exception:
+            pass
+        if self.battle_shop_window is not None:
+            try:
+                self.battle_shop_window.play_enhance_effect(effect_kind)
+            except Exception:
+                pass
+        self.refresh_progression_ui()
+
+    def stage_attack(self):
+        """한 번의 타격으로 스테이지를 진행"""
+        if self.progression is None:
+            QMessageBox.warning(self, "오류", "진행도 매니저를 초기화할 수 없습니다.")
+            return
+        result = self.progression.hit_stage_battle()
+        remaining = max(0, result["remaining_hp"])
+        summary = (
+            f"{result['hit_index']}타: -{result['hit_damage']} (계수 {result['factor']}) | "
+            f"남은 HP {remaining}/{result['hp']} "
+            f"({result['hits_used']}/{result['limit']}타)"
+        )
+
+        # 크리티컬/회피 색상 결정
+        log_color = None
+        hit_sound = "A_normal.mp3"
+        if result["factor"] >= 1.2:
+            log_color = "#EF4444"  # 크리티컬
+            summary = f"[크리티컬] {summary}"
+            hit_sound = "A_crit.mp3"
+        elif result["factor"] <= 0.8:
+            log_color = "#60A5FA"  # 회피
+            summary = f"[회피] {summary}"
+            hit_sound = "A_dodge.mp3"
+
+        # 타격 사운드 재생
+        try:
+            self.play_sound(hit_sound)
+        except Exception:
+            pass
+
+        if result["success"]:
+            self.handle_log(f"⚔️ 스테이지 {result['target_stage']} 클리어! {summary}", "SUCCESS")
+            QMessageBox.information(self, "스테이지 돌파", f"스테이지 {result['target_stage']} 달성!\n{summary}")
+        elif result["finished"]:
+            self.handle_log(f"⚔️ 스테이지 도전 실패: {summary}", "WARNING")
+            QMessageBox.warning(self, "스테이지 실패", f"10타를 모두 사용했습니다.\n{summary}")
+        else:
+            self.handle_log(f"⚔️ 전투 진행 중: {summary}", "INFO")
+
+        if self.battle_shop_window is not None:
+            self.battle_shop_window.show_damage(
+                dmg=result["hit_damage"],
+                remaining=remaining,
+                finished=result["finished"],
+                success=result["success"],
+            )
+            if log_color:
+                self.battle_shop_window.append_battle_log_colored(summary, log_color)
+            else:
+                self.battle_shop_window.append_battle_log(summary)
+            if result["finished"]:
+                # 10타 사용 또는 클리어 후 로그 초기화
+                QTimer.singleShot(400, self.battle_shop_window.clear_battle_log)
+                QTimer.singleShot(400, lambda: self.battle_shop_window.damage_label.setText(""))
+            self.battle_shop_window.set_remaining_hp(remaining, result["hp"], result["hits_used"], result["limit"])
+
+        self.refresh_progression_ui()
+
+    def grant_session_rewards(self, total_focus_minutes: int, completed_cycles: int):
+        """
+        세션 종료 시 포인트 보상 및 스테이지 상승을 처리한다.
+        - progression 매니저가 없으면 조용히 무시
+        """
+        if self.progression is None:
+            return
+        try:
+            earned = self.progression.grant_points_from_session(
+                total_focus_minutes=total_focus_minutes,
+                completed_cycles=completed_cycles,
+                focus_duration=self.focus_duration,
+            )
+            if earned > 0:
+                snap = self.progression.snapshot()
+                self.handle_log(
+                    f"🎁 포인트 획득: {earned}p (보유 {snap['points']}p, 전투력 {snap['total_power']})",
+                    "SUCCESS",
+                )
+            stage_after = self.progression.try_auto_advance()
+            if stage_after:
+                snap = self.progression.snapshot()
+                self.handle_log(
+                    f"🏆 스테이지 {stage_after} 달성! (총 전투력 {snap['total_power']}, 다음 요구 {snap['next_stage_requirement']})",
+                    "SUCCESS",
+                )
+            self.refresh_progression_ui()
+        except Exception as e:
+            print(f"포인트 보상 처리 오류: {e}")
+
     def toggle_session(self):
         if not self.is_running: self.start_session()
         else: self.stop_session()
@@ -643,6 +877,7 @@ class StudyWithLogic(StudyWithUI):
                     focus_duration=self.focus_duration,
                     break_duration=self.break_duration
                 )
+                self.grant_session_rewards(total_focus_minutes, completed_cycles)
                 self.session_start_time = None
                 self.total_focus_seconds = 0
                 
@@ -740,6 +975,7 @@ class StudyWithLogic(StudyWithUI):
                     focus_duration=self.focus_duration,
                     break_duration=self.break_duration
                 )
+                self.grant_session_rewards(total_focus_minutes, self.total_cycles)
                 self.session_start_time = None
                 self.total_focus_seconds = 0
                 
